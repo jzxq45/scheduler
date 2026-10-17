@@ -107,7 +107,7 @@ func TestJobCRUD(t *testing.T) {
 	}
 
 	// get
-	rec, body = do(t, s, "GET", fmt.Sprintf("/api/jobs/%d", d.ID), nil)
+	rec, _ = do(t, s, "GET", fmt.Sprintf("/api/jobs/%d", d.ID), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get: %d", rec.Code)
 	}
