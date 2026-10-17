@@ -225,10 +225,6 @@ func (s *Scheduler) claim(ctx context.Context, now time.Time, j store.Job) {
 		return
 	}
 
-	last := now
-	if j.LastRunAt != nil && j.LastRunAt.After(last) {
-		last = *j.LastRunAt
-	}
 	s.enqueueClaimed(ctx, j, now, nil)
 }
 

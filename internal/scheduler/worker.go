@@ -168,6 +168,9 @@ func (p *Pool) runOne(ctx context.Context, t Task) {
 			status = store.StatusSkipped
 		case timeoutExceeded(runCtx):
 			status = store.StatusTimeout
+			// Enriched message must exist before FinishRun, or the
+			// timeout note never reaches the stored run.
+			errMsg = msg(errMsg, fmt.Sprintf("timeout after %s", timeout))
 		default:
 			status = store.StatusFailed
 		}
@@ -180,9 +183,6 @@ func (p *Pool) runOne(ctx context.Context, t Task) {
 	p.rep.JobFinished(j.Name, status, fin.Sub(start))
 
 	if status == store.StatusFailed || status == store.StatusTimeout {
-		if status == store.StatusTimeout {
-			errMsg = msg(errMsg, fmt.Sprintf("timeout after %s", timeout))
-		}
 		p.handleRetries(ctx, t, start)
 	}
 }
