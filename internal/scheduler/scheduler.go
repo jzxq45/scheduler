@@ -79,11 +79,6 @@ type Scheduler struct {
 
 	mu       sync.Mutex
 	inflight map[int64]bool
-
-	// queueClosed guards one-shot pool shutdown.
-	poolStarted sync.Once
-	poolDrained sync.WaitGroup
-	drainDone   chan struct{}
 }
 
 // New builds a scheduler; Run starts the loop.
@@ -93,13 +88,12 @@ func New(db *store.DB, clk clock.Clock, exec Executor, opt Options, rep Reporter
 		rep = noopReporter{}
 	}
 	s := &Scheduler{
-		db:        db,
-		clk:       clk,
-		opt:       opt,
-		log:       opt.Log,
-		rep:       rep,
-		inflight:  make(map[int64]bool),
-		drainDone: make(chan struct{}),
+		db:       db,
+		clk:      clk,
+		opt:      opt,
+		log:      opt.Log,
+		rep:      rep,
+		inflight: make(map[int64]bool),
 	}
 	s.pool = NewPool(opt.PoolSize, exec, db, clk, opt.Log, rep, s.release)
 	s.retry = NewRetryQueue(clk, s.pool.Enqueue, func(t Task, attempt int) {
