@@ -101,7 +101,7 @@ func TestBearerAuth(t *testing.T) {
 	}
 
 	// Correct header token → accepted.
-	req = httptest.NewRequest("POST", "/api/jobs", strings.NewReader(`{"name":"x","schedule":"* * * * *","command":"c"}`))
+	req = httptest.NewRequest("POST", "/api/jobs", strings.NewReader(`{"name":"x","schedule":"* * * * *","command":"c","timeout_seconds":60}`))
 	req.Header.Set("Authorization", "Bearer s3cret")
 	rec = httptest.NewRecorder()
 	ts.ServeHTTP(rec, req)
@@ -235,6 +235,20 @@ func TestValidation(t *testing.T) {
 		if c.name == "bad timezone" {
 			c.dto.Timezone = "Mars/Olympus"
 		}
+		rec, _ := do(t, s, "POST", "/api/jobs", c.dto)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d", c.name, rec.Code)
+		}
+	}
+
+	// Range validation.
+	ranges := []struct{ name string; dto JobDTO }{
+		{"timeout zero", jobBody("x", "* * * * *", true)},
+		{"huge retries", jobBody("x", "* * * * *", true)},
+	}
+	ranges[0].dto.TimeoutSeconds = 0
+	ranges[1].dto.MaxRetries = 33
+	for _, c := range ranges {
 		rec, _ := do(t, s, "POST", "/api/jobs", c.dto)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: want 400, got %d", c.name, rec.Code)

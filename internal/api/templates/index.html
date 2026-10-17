@@ -38,8 +38,8 @@
   <label>Command <input name="command" required></label>
   <label>Payload (stdin, optional) <input name="payload"></label>
   <label>Timezone <input name="timezone" value="UTC"></label>
-  <label>Timeout (sec) <input name="timeout_seconds" type="number" value="300"></label>
-  <label>Max retries <input name="max_retries" type="number" value="0"></label>
+  <label>Timeout (sec, 1..86400) <input name="timeout_seconds" type="number" min="1" max="86400" value="300" required></label>
+  <label>Max retries (0..32) <input name="max_retries" type="number" min="0" max="32" value="0"></label>
   <label>Enabled <input name="enabled" type="checkbox" checked></label>
   <p><button type="submit">Create</button></p>
   <p id="createErr" style="color:#c00"></p>

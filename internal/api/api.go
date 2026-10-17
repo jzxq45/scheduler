@@ -173,6 +173,13 @@ func runDTO(r store.Run) RunDTO {
 // (unfinished payloads aside, jobs are tiny).
 const maxJobBody = 1 << 20
 
+// Range caps for per-job fields; reject nonsense outright instead of
+// letting the worker pool guess.
+const (
+	maxTimeoutSeconds  = 24 * 60 * 60
+	maxRetriesAllowed  = 32
+)
+
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxJobBody)
 	var d JobDTO
@@ -381,6 +388,12 @@ func (s *Server) buildJob(d JobDTO) (store.Job, error) {
 	}
 	if j.Command == "" {
 		return j, fmt.Errorf("command is required")
+	}
+	if j.TimeoutSeconds < 1 || j.TimeoutSeconds > maxTimeoutSeconds {
+		return j, fmt.Errorf("timeout_seconds must be 1..%d, got %d", maxTimeoutSeconds, j.TimeoutSeconds)
+	}
+	if j.MaxRetries < 0 || j.MaxRetries > maxRetriesAllowed {
+		return j, fmt.Errorf("max_retries must be 0..%d, got %d", maxRetriesAllowed, j.MaxRetries)
 	}
 	if _, err := cronexpr.Parse(j.Schedule); err != nil {
 		return j, fmt.Errorf("schedule: %w", err)
