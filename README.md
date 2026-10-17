@@ -1,139 +1,196 @@
-# scheduler
+<div align="center">
 
-A cron scheduler in Go: SQLite persistence, a fixed worker pool,
-missed-schedule policies, retries with exponential backoff, a JSON API,
-a single-page dashboard with live SSE events, Prometheus metrics and a
-self-hosted retention cleaner.
+# Go Cron Scheduler
 
-Stdlib-first: `net/http`, `html/template`, `log/slog`,
-`modernc.org/sqlite` (pure-Go SQLite). The only direct dependencies are
-`modernc.org/sqlite`, `golang.org/x/sync` and `github.com/google/uuid`;
-the cron expression parser is written from scratch
-(`internal/cronexpr`), so projection semantics are fully under test
-control.
+A dependable job scheduler with its own cron parser, SQLite run history, and Prometheus metrics.
+
+[![Go Version](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/doc/devel/release)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Build Status](https://github.com/jzxq45/scheduler/actions/workflows/ci.yml/badge.svg)](https://github.com/jzxq45/scheduler/actions/workflows/ci.yml)
+
+</div>
+
+---
+
+Go Cron Scheduler runs shell commands on cron schedules — with a
+worker pool, exponential-backoff retries, missed-run policies
+(`skip` / `latest` / `catchup`), a built-in web dashboard with a live
+SSE log, run history in SQLite (WAL) and Prometheus metrics. The cron
+parser and the test clock are written from scratch, so time-dependent
+behaviour is tested deterministically.
 
 ## Features
 
-- **Cron expressions** — 5-field (min hour dom mon dow) and 6-field
-  (with seconds) specs; `*`, `?`, lists, ranges, steps, month/weekday
-  names; DST-aware next-fire computation.
-- **Store** — SQLite in WAL mode with migrations; `jobs` and `runs`
-  tables; run output capped at the last 64 KiB per run.
-- **Worker pool** — fixed-size pool fed by a buffered channel; at most
-  one in-flight execution per job; graceful drain on shutdown.
-- **Missed-run policies** (`missed_policy`):
-  - `skip` — roll the schedule forward, never fire in the past
-    (default);
-  - `latest` — run the last missed fire once, then roll forward;
-  - `catchup` — run every missed fire time (backlog capped at 200).
-- **Retries** — exponential backoff (1s, 2s, 4s, … capped at 5 min),
-  configurable per job with `max_retries`; exhausted attempts go to a
-  `failed_final` dead-letter state.
-- **Executor** — commands run through the OS shell (`sh -c` /
-  `cmd /C`), optional stdin payload, per-job timeout with
-  `context.WithTimeout`, merged stdout+stderr.
-- **HTTP API + UI** — CRUD for jobs, "Run now", run history, and an
-  SSE stream (`/events`) feeding the live log on the dashboard.
-- **Metrics** — Prometheus text format at `/metrics`
+- **Own cron parser** — 5-field (`min hour dom mon dow`) and 6-field
+  (with seconds) expressions; `*`, `?`, lists, ranges, steps and
+  month/weekday names; DST-aware next-fire projection. See
+  [CRON-SYNTAX.md](CRON-SYNTAX.md).
+- **Worker pool** — a fixed-size pool fed by a buffered channel; at
+  most one in-flight execution per job; graceful drain on shutdown.
+- **Exponential backoff retry** — 1 s, 2 s, 4 s, … capped at 5 min,
+  per-job `max_retries`; exhausted attempts land in a `failed_final`
+  dead-letter state.
+- **Durable runs** — SQLite (pure Go driver, WAL) stores every run
+  with merged stdout+stderr (last 64 KiB), status and attempt number;
+  runs interrupted by a restart are closed as `failed`.
+- **Missed-run policies** — `skip`, `latest` or bounded `catchup`
+  (backlog capped at 200 firings) configured globally.
+- **Web UI** — single-page dashboard: CRUD for jobs, a **Run now**
+  button, run history with output and a live SSE event log.
+- **Prometheus metrics** — standard text exposition at `/metrics`
   (`jobs_started_total`, `jobs_finished_total{status=…}`,
   `jobs_retried_total`, `job_duration_seconds_*`,
-  `job_next_run_in_seconds`, `scheduler_uptime_seconds`).
-- **Retention** — a cleanup goroutine sweeps `runs` older than
-  `retention_days` every hour.
+  `job_next_run_in_seconds`).
+- **Graceful shutdown** — on SIGINT/SIGTERM: HTTP stops accepting,
+  running jobs drain within their timeout budget, orphaned runs are
+  reconciled at next start.
 
 ## Quick start
 
-```sh
-make build
-./bin/scheduler            # reads config.yaml, listens on :8081
-```
-
-Open `http://localhost:8081/` for the dashboard. Create a job via the
-form or the API:
+Requires Go 1.22+ (the `go` directive in go.mod may pin a newer
+toolchain; the default `GOTOOLCHAIN=auto` downloads it transparently —
+the same mechanism CI relies on).
 
 ```sh
-curl -s localhost:8081/api/jobs -d '{
-  "name": "hello",
-  "schedule": "*/5 * * * *",
-  "command": "echo hi from cron",
-  "timezone": "Europe/Berlin",
-  "timeout_seconds": 30,
-  "max_retries": 2
-}' | jq
+# Run in place (reads ./config.yaml if present, listens on :8081)
+go run ./cmd/scheduler
 ```
 
-Run it now from the dashboard or:
+Then open <http://localhost:8081/> — create a job from the form:
+
+- Name: `hello`
+- Schedule: `*/5 * * * *`
+- Command: `echo hello from cron`
+
+![Dashboard](docs/screenshot.png)
+
+Or use the API (below). A missing config file is fine: defaults apply
+and every setting can be overridden with `SCHEDULER_*` env vars, e.g.
 
 ```sh
-curl -si -X POST localhost:8081/api/jobs/1/run
+SCHEDULER_LISTEN=127.0.0.1:8080 SCHEDULER_DB_PATH=/tmp/sched.db go run ./cmd/scheduler
 ```
 
-Follow the live event stream:
-
-```sh
-curl -N localhost:8081/events
-```
-
-Scrape metrics:
-
-```sh
-curl -s localhost:8081/metrics
-```
-
-## Configuration
-
-`config.yaml` is a flat `key: value` file; every key can be overridden
-with `SCHEDULER_<KEY>` environment variables. A missing config file is
-not an error — defaults (plus env) are used, which is what the Docker
-image relies on.
-
-| key                | env override           | default     | meaning |
-|--------------------|------------------------|-------------|---------|
-| `listen`           | `SCHEDULER_LISTEN`     | `0.0.0.0:8081` | HTTP bind address |
-| `db_path`          | `SCHEDULER_DB_PATH`    | `scheduler.db` | SQLite file |
-| `worker_pool_size` | `SCHEDULER_WORKER_POOL_SIZE` | `10`  | fixed worker count (1..1024) |
-| `retention_days`   | `SCHEDULER_RETENTION_DAYS`   | `30`   | keep finished runs this long |
-| `log_level`        | `SCHEDULER_LOG_LEVEL`  | `info`      | `debug`, `info`, `warn`, `error` |
-| `missed_policy`    | `SCHEDULER_MISSED_POLICY` | `skip`   | `skip`, `latest` or `catchup` |
-
-Unknown YAML keys fail startup fast (typo protection); unknown env
-vars are ignored.
-
-## HTTP API
-
-| Method | Path                  | Purpose |
-|--------|-----------------------|---------|
-| GET    | `/`                   | dashboard (single page) |
-| GET    | `/api/jobs`           | list jobs |
-| POST   | `/api/jobs`           | create (JSON body; absent `enabled` means true) |
-| GET    | `/api/jobs/{id}`      | one job |
-| PUT    | `/api/jobs/{id}`      | update |
-| DELETE | `/api/jobs/{id}`      | delete (runs cascade) |
-| POST   | `/api/jobs/{id}/run`  | "Run now" (409 while the job is already running) |
-| GET    | `/api/jobs/{id}/runs` | run history (`?limit=`, ≤500) |
-| GET    | `/events`             | SSE stream of run events |
-| GET    | `/metrics`            | Prometheus exposition |
-
-Crash recovery: runs still marked `running` after a restart are closed
-as `failed` ("interrupted by scheduler restart").
-
-## Docker
+Run with Docker instead:
 
 ```sh
 docker build -t scheduler .
 docker run -p 8081:8081 -v scheduler-data:/data scheduler
 ```
 
-## Development
+## API Reference
+
+### Create a job — `POST /api/jobs`
 
 ```sh
-make test   # go test -race ./...
-make vet
-make run
+curl -si http://localhost:8081/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "backup-db",
+    "schedule": "0 3 * * *",
+    "command": "pg_dump --port 5432 mydb | gzip > /backups/mydb.sql.gz",
+    "timezone": "Europe/Berlin",
+    "timeout_seconds": 600,
+    "max_retries": 2
+  }'
 ```
 
-CI (GitHub Actions) runs `go vet` and the race-enabled test suite on
-Linux and Windows, then builds the Docker image.
+`201 Created` returns the stored job including its computed
+`next_run_at`; a duplicate `name` answers `409`, an invalid schedule
+answers `400` with the parser error.
 
-See [CRON-SYNTAX.md](CRON-SYNTAX.md) for the expression grammar and
-[ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together.
+### List jobs — `GET /api/jobs`
+
+```sh
+curl -s http://localhost:8081/api/jobs | jq
+```
+
+```json
+[
+  {
+    "id": 1,
+    "name": "backup-db",
+    "schedule": "0 3 * * *",
+    "command": "pg_dump ...",
+    "enabled": true,
+    "timezone": "Europe/Berlin",
+    "timeout_seconds": 600,
+    "max_retries": 2,
+    "last_run_at": "2026-10-17T01:00:02Z",
+    "next_run_at": "2026-10-18T01:00:00Z"
+  }
+]
+```
+
+Other endpoints:
+
+| Method | Path                  | Purpose |
+|--------|-----------------------|---------|
+| GET/PUT/DELETE | `/api/jobs/{id}` | read / update / delete (runs cascade) |
+| POST   | `/api/jobs/{id}/run`  | trigger immediately (409 while running) |
+| GET    | `/api/jobs/{id}/runs` | run history (`?limit=`, ≤500) |
+| GET    | `/events`             | live SSE events |
+| GET    | `/metrics`            | Prometheus metrics |
+
+## Architecture
+
+```
+             ┌──────────────────────────────────────────┐
+             │            cmd/scheduler (main)          │
+             │  errgroup{ HTTP server, scheduler.Run,   │
+             │            retention sweeper }           │
+             └───────┬──────────────────┬───────────────┘
+                     │                  │
+   Ticker (1 s, clock.Clock)            │
+                     │                  │
+                     ▼                  │
+             ┌───────────────┐          │
+             │  Scheduler    │  claim: in-flight guard + next_run booking
+             │  (tick loop)  │──────────────────────►  internal/store
+             └───────┬───────┘                          (SQLite WAL:
+                     │ enqueue Task                     jobs, runs)
+                     ▼
+             ┌───────────────┐   per-job context timeout
+             │  Worker Pool  │  ─── Execute ───► os/exec (shell), 64 KiB
+             │ (N workers)   │                    merged output tail
+             └───────┬───────┘
+                     │ on failure
+                     ▼
+             ┌───────────────┐   1s → 2s → 4s → … (cap 5 min)
+             │  RetryQueue   │  exhausted ───► failed_final (dead letter)
+             └───────────────┘
+```
+
+The tick loop drives job claiming, the pool executes them, retries
+re-enter the pool through the retry queue, and every step persists to
+`internal/store`. Full details: [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Why a custom cron parser and FakeClock
+
+**Own cron parser (`internal/cronexpr`).** Third-party cron libraries
+expose `Next(time.Time)` as a black box: the semantics of daylight
+savings transition, the dom/dow OR-rule and sec-field stepping are
+implementation details that can silently drift between versions. This
+scheduler's whole correctness story ("what fires next, and when")
+depends on that function, so the parser lives inside the repo — 60+
+test cases, cross-checked against [crontab.guru](https://crontab.guru)
+expectations, document and pin the exact projection behaviour.
+
+**FakeClock (`internal/clock`).** Every scheduling decision — the tick
+loop, retry backoff timers, retention sweeps — obtains time and timers
+through a `clock.Clock` interface. Production uses `Real`; tests inject
+`Fake`, whose timers only fire on an explicit `Advance()`. That makes
+the cursed cases deterministic:
+
+- "3 missed midnight runs" → three catch-up executions, no wall sleep;
+- "backoff 1 s → 2 s → 4 s" → three advances, asserted on SQLite state;
+- "drain while a task is blocked" → bounded shutdown, run ends as
+  `skipped`.
+
+The test suite runs with `-race` in CI and never sleeps to let "time
+pass" — time is a dependency, so it is injected like any other.
+
+## License
+
+Released under the [MIT License](LICENSE) — free to use, modify and
+distribute with attribution.

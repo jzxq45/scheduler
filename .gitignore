@@ -1,3 +1,38 @@
-scheduler.db*
-bin/
+# Binaries
 *.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+
+# Test binaries and profiling output
+*.test
+*.out
+coverage.*
+
+# Databases (SQLite main file + WAL/SHM sidecars)
+*.db
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+
+# Environment files and local config overrides
+.env
+.env.*
+config.local.yaml
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# Go workspace files
+go.work
+go.work.sum
+
+# OS junk
+.DS_Store
+Thumbs.db
