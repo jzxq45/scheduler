@@ -169,7 +169,12 @@ func runDTO(r store.Run) RunDTO {
 
 // ---- handlers ----
 
+// maxJobBody bounds the JSON payload accepted from API clients
+// (unfinished payloads aside, jobs are tiny).
+const maxJobBody = 1 << 20
+
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJobBody)
 	var d JobDTO
 	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
 		httpError(w, http.StatusBadRequest, "bad json: "+err.Error())
@@ -226,6 +231,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJobBody)
 	var d JobDTO
 	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
 		httpError(w, http.StatusBadRequest, "bad json: "+err.Error())

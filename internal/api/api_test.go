@@ -209,6 +209,17 @@ func TestJobCRUD(t *testing.T) {
 	}
 }
 
+// TestOversizedBodyRejected keeps blob uploads from OOM-ing the
+// process: JSON bodies are capped at 1 MiB.
+func TestOversizedBodyRejected(t *testing.T) {
+	s, _, _ := testServer(t)
+	big := strings.Repeat("x", 2<<20) // 2 MiB, over the cap
+	rec, _ := do(t, s, "POST", "/api/jobs", big)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversize body: %d", rec.Code)
+	}
+}
+
 func TestValidation(t *testing.T) {
 	s, _, _ := testServer(t)
 	cases := []struct {
