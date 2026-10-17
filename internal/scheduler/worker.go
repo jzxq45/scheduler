@@ -149,8 +149,13 @@ func (p *Pool) runOne(ctx context.Context, t Task) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// The run record must survive shutdown: the scheduler context is
+	// cancelled while draining, but jobs still finishing in that window
+	// have to write their final status and output to the store.
+	dbCtx := context.WithoutCancel(ctx)
+
 	p.rep.JobStarted(j.Name)
-	runID, err := p.db.CreateRun(ctx, j.ID, start, t.Attempt)
+	runID, err := p.db.CreateRun(dbCtx, j.ID, start, t.Attempt)
 	if err != nil {
 		p.log.Error("create run", "job", j.Name, "err", err)
 		return
@@ -177,13 +182,13 @@ func (p *Pool) runOne(ctx context.Context, t Task) {
 	}
 
 	fin := p.clk.Now()
-	if err := p.db.FinishRun(ctx, runID, status, fin, out, errMsg); err != nil {
+	if err := p.db.FinishRun(dbCtx, runID, status, fin, out, errMsg); err != nil {
 		p.log.Error("finish run", "job", j.Name, "err", err)
 	}
 	p.rep.JobFinished(j.Name, status, fin.Sub(start))
 
 	if status == store.StatusFailed || status == store.StatusTimeout {
-		p.handleRetries(ctx, t, start)
+		p.handleRetries(dbCtx, t, start)
 	}
 }
 

@@ -338,12 +338,33 @@ func TestSchedulerDrain(t *testing.T) {
 	db, clk, cnt, s := setup(t, Options{PoolSize: 1, Log: testLogger()}, exec)
 	createJob(t, db, "minute", "* * * * *", 0)
 	_ = cnt
-	runScheduler(t, s)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Run(ctx) }()
+
 	waitNext(t, db, "minute", mkT("2024-03-01T10:01:00Z"))
 	clk.Advance(time.Minute)
 	waitFor(t, func() bool { return exec.size() >= 1 })
-	// Cleanup cancels ctx: Run returns. Executor blocks, so the run
-	// should end as skipped with a bounded drain.
+
+	// Cancel while the task is blocked in the executor: the run must
+	// still be recorded (db writes use context.WithoutCancel) as
+	// skipped with a finished_at and an error note.
+	cancel()
+	waitFor(t, func() bool {
+		runs := mustRuns(t, db, 10)
+		return len(runs) == 1 && runs[0].Status == store.StatusSkipped &&
+			runs[0].FinishedAt != nil && runs[0].Error != ""
+	})
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("scheduler did not shut down")
+	}
 }
 
 func TestRunNowImmediate(t *testing.T) {
