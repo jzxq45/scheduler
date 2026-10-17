@@ -1,0 +1,13 @@
+# golangci-lint v2 configuration.
+# Docs: https://golangci-lint.run/docs/configuration
+version: "2"
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  disable:
+    # errcheck flags unchecked `defer rows.Close()`, `defer db.Close()`,
+    # `fmt.Fprintf` to an SSE stream and similar cleanup/report calls
+    # where an error can no longer be acted upon. The rest of the
+    # standard set (staticcheck, govet, ...) stays on.
+    - errcheck
