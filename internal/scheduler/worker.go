@@ -30,9 +30,11 @@ type Task struct {
 // at most one worker; nothing spawns per-task goroutines.
 type Pool struct {
 	queue chan Task
-	// stop closed by Drain; workers reading Enqueue leave without
-	// racing close(queue).
-	stop chan struct{}
+	// stopped guards the one-shot queue close: Enqueue reads it under
+	// RLock so a post-Drain send can never hit `send on closed
+	// channel` (no recover-at-a-distance hacks).
+	mu      sync.RWMutex
+	stopped bool
 
 	exec    Executor
 	db      *store.DB
@@ -40,7 +42,7 @@ type Pool struct {
 	log     *slog.Logger
 	rep     Reporter
 	release func(jobID int64)
-	retry   func(Task, time.Duration)
+	retry   func(context.Context, Task, time.Duration)
 
 	wg      sync.WaitGroup
 	started bool
@@ -60,12 +62,11 @@ func NewPool(size int, exec Executor, db *store.DB, clk eventClock, log *slog.Lo
 		log:     log,
 		rep:     rep,
 		release: release,
-		stop:    make(chan struct{}),
 	}
 }
 
 // SetRetry wires the retry sink (installed after RetryQueue exists).
-func (p *Pool) SetRetry(fn func(Task, time.Duration)) { p.retry = fn }
+func (p *Pool) SetRetry(fn func(context.Context, Task, time.Duration)) { p.retry = fn }
 
 // Start launches workers; each exits when ctx is done or Drain runs.
 func (p *Pool) Start(ctx context.Context) {
@@ -93,28 +94,38 @@ func (p *Pool) worker(ctx context.Context, i int) {
 	}
 }
 
-// Enqueue hands a task to a worker, non-blocking. Send-on-closed can
-// race with Drain; recovering here guards the shutdown race without a
-// mutex on the normal path.
+// Enqueue hands a task to a worker, non-blocking. It refuses work
+// once Stop has closed the queue (checked under RLock).
 func (p *Pool) Enqueue(t Task) {
-	defer func() {
-		if recover() != nil {
-			p.release(t.StoreJob.ID)
-		}
-	}()
+	p.mu.RLock()
+	stopped := p.stopped
+	p.mu.RUnlock()
+	if stopped {
+		p.release2(t.StoreJob.ID)
+		return
+	}
 	select {
 	case p.queue <- t:
-	case <-p.stop:
-		// Draining: refuse new work.
 	default:
 		p.log.Error("pool queue full, dropping task", "job", t.StoreJob.Name)
-		p.release(t.StoreJob.ID)
+		p.release2(t.StoreJob.ID)
 	}
+}
+
+// Stop flags the pool closed and closes the queue exactly once.
+func (p *Pool) Stop() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped {
+		return
+	}
+	p.stopped = true
+	close(p.queue)
 }
 
 // Drain closes the queue and waits up to d for the tail to finish.
 func (p *Pool) Drain(d time.Duration) {
-	close(p.queue)
+	p.Stop()
 	done := make(chan struct{})
 	go func() {
 		p.wg.Wait()
@@ -125,6 +136,13 @@ func (p *Pool) Drain(d time.Duration) {
 		p.log.Info("drain complete")
 	case <-time.After(d):
 		p.log.Warn("drain timeout, tasks still running")
+	}
+}
+
+// release2 calls the release hook if one is wired.
+func (p *Pool) release2(jobID int64) {
+	if p.release != nil {
+		p.release(jobID)
 	}
 }
 
@@ -207,7 +225,7 @@ func msg(base, extra string) string {
 
 // handleRetries enqueues the next attempt after exponential backoff,
 // or marks this run failed_final when attempts are exhausted.
-func (p *Pool) handleRetries(ctx context.Context, t Task, start time.Time) {
+func (p *Pool) handleRetries(dbCtx context.Context, t Task, start time.Time) {
 	j := t.StoreJob
 	if j.MaxRetries < 0 {
 		j.MaxRetries = 0
@@ -216,7 +234,7 @@ func (p *Pool) handleRetries(ctx context.Context, t Task, start time.Time) {
 	// beyond the first.
 	retriesDone := t.Attempt - 1
 	if retriesDone >= j.MaxRetries {
-		if err := p.db.MarkRunsFinal(ctx, j.ID); err != nil {
+		if err := p.db.MarkRunsFinal(dbCtx, j.ID); err != nil {
 			p.log.Error("dead letter", "job", j.Name, "err", err)
 		}
 		return
@@ -224,7 +242,9 @@ func (p *Pool) handleRetries(ctx context.Context, t Task, start time.Time) {
 	if p.retry == nil {
 		return
 	}
-	p.retry(Task{StoreJob: j, Attempt: t.Attempt + 1}, backoffDelay(t.Attempt))
+	// A retry timer armed just before shutdown may outlive the
+	// scheduler; its delivery will be refused by the stopped pool.
+	p.retry(dbCtx, Task{StoreJob: j, Attempt: t.Attempt + 1}, backoffDelay(t.Attempt))
 }
 
 // backoffDelay schedules attempt n+1 after 2^(n-1) seconds capped at

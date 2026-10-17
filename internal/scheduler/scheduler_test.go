@@ -406,7 +406,7 @@ func TestWorkerExecutesTask(t *testing.T) {
 	db := openDB(t)
 	clk := clock.NewFake(mkT("2024-03-01T10:00:00Z"))
 	pool := NewPool(1, exec, db, clk, testLogger(), noopReporter{}, func(int64) {})
-	pool.SetRetry(func(Task, time.Duration) {})
+	pool.SetRetry(func(context.Context, Task, time.Duration) {})
 	pool.Start(context.Background())
 
 	j := createJob(t, db, "w", "* * * * *", 0)
@@ -428,7 +428,7 @@ func TestWorkerPoolConcurrency(t *testing.T) {
 	db := openDB(t)
 	clk := clock.NewFake(mkT("2024-03-01T10:00:00Z"))
 	pool := NewPool(4, exec, db, clk, testLogger(), noopReporter{}, func(int64) {})
-	pool.SetRetry(func(Task, time.Duration) {})
+	pool.SetRetry(func(context.Context, Task, time.Duration) {})
 	pool.Start(context.Background())
 
 	for i := 0; i < 4; i++ {
@@ -437,6 +437,42 @@ func TestWorkerPoolConcurrency(t *testing.T) {
 	}
 	waitFor(t, func() bool { return exec.size() >= 4 })
 	pool.Drain(time.Second)
+}
+
+// TestEnqueueAfterDrain: post-stop sends must be refused cleanly (no
+// send-on-closed-channel panic, task released instead of run).
+func TestEnqueueAfterDrain(t *testing.T) {
+	t.Parallel()
+	exec := &fakeExec{}
+	db := openDB(t)
+	clk := clock.NewFake(mkT("2024-03-01T10:00:00Z"))
+	released := make(chan int64, 4)
+	pool := NewPool(1, exec, db, clk, testLogger(), noopReporter{}, func(id int64) {
+		released <- id
+	})
+	pool.SetRetry(func(context.Context, Task, time.Duration) {})
+	pool.Start(context.Background())
+	j := createJob(t, db, "late", "* * * * *", 0)
+
+	pool.Drain(time.Second) // closes the queue
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pool.Enqueue(Task{StoreJob: j, Attempt: 1})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Enqueue after Drain deadlocked")
+	}
+	select {
+	case id := <-released:
+		if id != j.ID {
+			t.Fatalf("released wrong job %d", id)
+		}
+	default:
+		t.Fatal("dropped task was not released")
+	}
 }
 
 func TestBackoffDelays(t *testing.T) {

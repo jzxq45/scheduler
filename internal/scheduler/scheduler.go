@@ -96,16 +96,16 @@ func New(db *store.DB, clk clock.Clock, exec Executor, opt Options, rep Reporter
 		inflight: make(map[int64]bool),
 	}
 	s.pool = NewPool(opt.PoolSize, exec, db, clk, opt.Log, rep, s.release)
-	s.retry = NewRetryQueue(clk, s.pool.Enqueue, func(t Task, attempt int) {
-		rep.RetryScheduled(t.StoreJob.Name, attempt)
-	})
+	s.retry = NewRetryQueue(clk, func(_ context.Context, t Task) { s.pool.Enqueue(t) },
+		func(t Task, attempt int) {
+			rep.RetryScheduled(t.StoreJob.Name, attempt)
+		})
 	s.pool.SetRetry(s.retry.Arm)
 	return s
 }
 
 // Run runs the tick loop until ctx is cancelled, then drains the pool.
 func (s *Scheduler) Run(ctx context.Context) error {
-	s.retry.SetRunCtx(ctx)
 	s.pool.Start(ctx) // errors inside workers are only logged
 
 	if err := s.replayMissed(ctx); err != nil {
