@@ -1,0 +1,8 @@
+# Scheduler configuration.
+# Every key can be overridden by env var SCHEDULER_<KEY> (uppercased).
+listen: "0.0.0.0:8081"
+db_path: scheduler.db
+worker_pool_size: 10
+retention_days: 30
+log_level: info
+missed_policy: skip # skip | catchup | latest
