@@ -344,6 +344,18 @@ func (db *DB) RunningRuns(ctx context.Context) ([]int64, error) {
 	return out, rows.Err()
 }
 
+// MarkRunsFinal flips every non-terminal failed run of a job to
+// failed_final: retries are exhausted, this is the dead-letter state.
+func (db *DB) MarkRunsFinal(ctx context.Context, jobID int64) error {
+	_, err := db.ExecContext(ctx,
+		`UPDATE runs SET status=? WHERE job_id=? AND status IN (?,?)`,
+		StatusFailedFinal, jobID, StatusFailed, StatusTimeout)
+	if err != nil {
+		return fmt.Errorf("mark runs final: %w", err)
+	}
+	return nil
+}
+
 // MarkOrphanedRuns closes runs still marked running after a restart:
 // the worker pool that owned them is gone.
 func (db *DB) MarkOrphanedRuns(ctx context.Context, now time.Time) (int64, error) {
