@@ -25,11 +25,18 @@ type Config struct {
 	RetentionDays  int
 	LogLevel       string
 	MissedPolicy   string
+	// APIToken, when set, makes the HTTP API require
+	// "Authorization: Bearer <token>" (a "token" query parameter is
+	// also accepted for EventSource clients). Empty disables auth.
+	APIToken string
 }
 
 func defaults() Config {
 	return Config{
-		Listen:         "0.0.0.0:8081",
+		// Loopback by default: the API can create/delete jobs and run
+		// arbitrary shell commands, so it must not bind a public
+		// interface unless the operator asks for it explicitly.
+		Listen:         "127.0.0.1:8081",
 		DBPath:         "scheduler.db",
 		WorkerPoolSize: 10,
 		RetentionDays:  30,
@@ -88,6 +95,8 @@ func applyYAML(cfg *Config, raw []byte) error {
 			cfg.LogLevel = val
 		case "missed_policy":
 			cfg.MissedPolicy = val
+		case "api_token":
+			cfg.APIToken = val
 		default:
 			return fmt.Errorf("line %d: unknown key %q", i+1, key)
 		}
@@ -144,6 +153,8 @@ func applyEnv(cfg *Config, env []string) error {
 			cfg.LogLevel = v
 		case "missed_policy":
 			cfg.MissedPolicy = v
+		case "api_token":
+			cfg.APIToken = v
 		}
 		if setErr != nil {
 			return fmt.Errorf("%s: %w", k, setErr)

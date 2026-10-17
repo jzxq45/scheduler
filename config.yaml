@@ -1,8 +1,14 @@
 # Scheduler configuration.
 # Every key can be overridden by env var SCHEDULER_<KEY> (uppercased).
-listen: "0.0.0.0:8081"
+# The loopback bind is deliberate: the API creates and runs shell
+# commands, so it stays off the network unless asked for.
+listen: "127.0.0.1:8081"
 db_path: scheduler.db
 worker_pool_size: 10
 retention_days: 30
 log_level: info
 missed_policy: skip # skip | catchup | latest
+# When set, every request must carry "Authorization: Bearer <token>"
+# (or "&token=<token>" for SSE clients). Leave empty in a trusted
+# single-user environment.
+# api_token: "change-me"

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +37,7 @@ func testServer(t *testing.T) (*Server, *store.DB, *starter) {
 	}
 	t.Cleanup(func() { db.Close() })
 	st := &starter{}
-	s := New(db, st, nil, nil)
+	s := New(db, st, nil, nil, "")
 	return s, db, st
 }
 
@@ -68,6 +69,56 @@ func jobBody(name, schedule string, enabled bool) JobDTO {
 	return JobDTO{
 		Name: name, Schedule: schedule, Command: "true " + name,
 		Enabled: &en, Timezone: "UTC", TimeoutSeconds: 60, MaxRetries: 1,
+	}
+}
+
+func TestBearerAuth(t *testing.T) {
+	s, _, _ := testServer(t)
+	_ = s // token server created below via NewWithToken helper
+
+	dbPath := filepath.Join(t.TempDir(), "auth.db")
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	st := &starter{}
+	ts := New(db, st, nil, nil, "s3cret")
+
+	// Missing token → 401 everywhere.
+	rec, body := do(t, ts, "GET", "/api/jobs", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: %d %s", rec.Code, body)
+	}
+
+	// Wrong token → 401.
+	req := httptest.NewRequest("POST", "/api/jobs", strings.NewReader(`{"name":"x","schedule":"* * * * *","command":"c"}`))
+	req.Header.Set("Authorization", "Bearer wrong")
+	rec = httptest.NewRecorder()
+	ts.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token: %d", rec.Code)
+	}
+
+	// Correct header token → accepted.
+	req = httptest.NewRequest("POST", "/api/jobs", strings.NewReader(`{"name":"x","schedule":"* * * * *","command":"c"}`))
+	req.Header.Set("Authorization", "Bearer s3cret")
+	rec = httptest.NewRecorder()
+	ts.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("bearer header: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Query parameter token accepted (EventSource cannot set headers).
+	rec, _ = do(t, ts, "GET", "/api/jobs?token=s3cret", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("query token: %d", rec.Code)
+	}
+
+	// Empty token (auth disabled) → open access.
+	rec, _ = do(t, s, "GET", "/api/jobs", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auth disabled: %d", rec.Code)
 	}
 }
 

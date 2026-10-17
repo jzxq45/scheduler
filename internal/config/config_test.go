@@ -30,7 +30,7 @@ func TestLoadMissingFile(t *testing.T) {
 
 func TestLoadDefaults(t *testing.T) {
 	t.Parallel()
-	cfg, err := Load(write(t, "listen: \"0.0.0.0:8081\"\ndb_path: scheduler.db\nworker_pool_size: 10\nretention_days: 30\nlog_level: info\nmissed_policy: skip\n"))
+	cfg, err := Load(write(t, "listen: \"127.0.0.1:8081\"\ndb_path: scheduler.db\nworker_pool_size: 10\nretention_days: 30\nlog_level: info\nmissed_policy: skip\n"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -62,13 +62,14 @@ func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("SCHEDULER_LISTEN", "0.0.0.0:8082")
 	t.Setenv("SCHEDULER_WORKER_POOL_SIZE", "7")
 	t.Setenv("SCHEDULER_MISSED_POLICY", "latest")
+	t.Setenv("SCHEDULER_API_TOKEN", "tok-123")
 	t.Setenv("OTHER", "ignored")
 
 	cfg, err := Load(write(t, "listen: \"0.0.0.0:8081\"\ndb_path: scheduler.db\nworker_pool_size: 10\nretention_days: 30\nlog_level: info\nmissed_policy: skip\n"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Listen != "0.0.0.0:8082" || cfg.WorkerPoolSize != 7 || cfg.MissedPolicy != "latest" {
+	if cfg.Listen != "0.0.0.0:8082" || cfg.WorkerPoolSize != 7 || cfg.MissedPolicy != "latest" || cfg.APIToken != "tok-123" {
 		t.Errorf("got %+v", cfg)
 	}
 }

@@ -29,12 +29,17 @@ type Server struct {
 	log   *slog.Logger
 	broker *Broker
 	mux   *http.ServeMux
+	// token, when non-empty, is required via
+	// "Authorization: Bearer <token>" (or "?token=" for EventSource,
+	// which cannot set custom headers).
+	token string
 }
 
 // New builds the server; RunStarter may be nil for API-only setups,
 // in which case "run now" answers 503. A pre-made broker lets main
-// share one hub between the scheduler Reporter and the server.
-func New(db *store.DB, sched RunStarter, log *slog.Logger, b *Broker) *Server {
+// share one hub between the scheduler Reporter and the server. An
+// empty apiToken disables authentication.
+func New(db *store.DB, sched RunStarter, log *slog.Logger, b *Broker, apiToken string) *Server {
 	if b == nil {
 		b = NewBroker()
 	}
@@ -43,12 +48,38 @@ func New(db *store.DB, sched RunStarter, log *slog.Logger, b *Broker) *Server {
 		sched:  sched,
 		log:    log,
 		broker: b,
+		token:  apiToken,
 	}
 	if log == nil {
 		s.log = slog.Default()
 	}
 	s.routes()
 	return s
+}
+
+// ServeHTTP authenticates (when a token is configured) and sets
+// baseline security headers before dispatching.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if err := s.authorize(r); err != nil {
+		httpError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	s.mux.ServeHTTP(w, r)
+}
+
+// authorize verifies the bearer token, if one is configured.
+func (s *Server) authorize(r *http.Request) error {
+	if s.token == "" {
+		return nil
+	}
+	if r.Header.Get("Authorization") == "Bearer "+s.token {
+		return nil
+	}
+	// EventSource cannot attach headers; keep the query-param channel.
+	if r.URL.Query().Get("token") == s.token {
+		return nil
+	}
+	return fmt.Errorf("unauthorized: missing or invalid API token")
 }
 
 // Broker exposes the SSE hub so the scheduler Reporter can publish.
@@ -74,11 +105,6 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /api/jobs/{id}/runs", s.listRuns)
 	mux.HandleFunc("GET /events", s.events)
 	s.mux = mux
-}
-
-// ServeHTTP implements http.Handler.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
 }
 
 // ---- JSON DTOs ----

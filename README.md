@@ -75,8 +75,37 @@ Run with Docker instead:
 
 ```sh
 docker build -t scheduler .
-docker run -p 8081:8081 -v scheduler-data:/data scheduler
+docker run -p 8081:8081 -v scheduler-data:/data \
+  -e SCHEDULER_LISTEN=0.0.0.0:8081 \
+  -e SCHEDULER_API_TOKEN=change-me \
+  scheduler
 ```
+
+## Security
+
+The HTTP API can create, edit, delete and **run arbitrary shell
+commands**, so it is dangerous to expose by default:
+
+- **Bind address.** The scheduler listens on `127.0.0.1:8081` unless
+  told otherwise. Only publish the UI/API behind a reverse proxy
+  with its own authentication.
+- **API token** — set `SCHEDULER_API_TOKEN` (or `api_token` in
+  `config.yaml`); then every request must carry
+  `Authorization: Bearer <token>`:
+
+  ```sh
+  curl -si localhost:8081/api/jobs \
+    -H "Authorization: Bearer my-secret-token"
+  ```
+
+  Browser clients (the dashboard, `EventSource`) can pass the token
+  as a query parameter instead — open
+  `http://localhost:8081/?token=<token>` once; it is remembered
+  locally and added to every request. `401` answers carry no hint
+  about *why* a token failed.
+- **No secrets in logs** — the scheduler logs configuration keys,
+  not values like the token; run output lives in the SQLite file,
+  not in stdout.
 
 ## API Reference
 

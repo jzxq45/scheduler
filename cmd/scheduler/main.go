@@ -97,7 +97,7 @@ func run() error {
 			Log:          logger,
 		}, reps)
 
-	apiSrv := api.New(db, sched, logger, broker)
+	apiSrv := api.New(db, sched, logger, broker, cfg.APIToken)
 	apiSrv.MetricsHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", metrics.ServerContent)
 		_, _ = w.Write([]byte(reg.Render()))

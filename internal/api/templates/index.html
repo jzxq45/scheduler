@@ -56,8 +56,33 @@
 <div id="log"><div>— live events (SSE) —</div></div>
 
 <script>
+// ---- auth token plumbing: Bearer cannot be set on EventSource, so a
+// "?token=" query parameter is used when one is configured.
+const TOKEN_PARAM = 'token';
+function saveToken(t) { localStorage.setItem('sched_token', t); }
+function token() {
+  const qs = new URLSearchParams(location.search).get(TOKEN_PARAM);
+  if (qs) { saveToken(qs); return qs; }
+  return localStorage.getItem('sched_token') || '';
+}
+function authedURL(u) {
+  const t = token();
+  if (!t) return u;
+  return u + (u.includes('?') ? '&' : '?') + TOKEN_PARAM + '=' + encodeURIComponent(t);
+}
+
+async function req(url, opts = {}) {
+  const res = await fetch(authedURL(url), opts);
+  if (res.status === 401) {
+    const t = prompt('Scheduler API token:');
+    if (t) { saveToken(t); return req(url, opts); }
+  }
+  return res;
+}
+
 async function refresh() {
-  const res = await fetch('/api/jobs');
+  const res = await req('/api/jobs');
+  if (!res.ok) return;
   const jobs = await res.json();
   const tb = document.querySelector('#jobs tbody');
   tb.innerHTML = '';
@@ -83,11 +108,11 @@ document.querySelector('#jobs').addEventListener('click', async (ev) => {
   const act = ev.target.dataset.act, id = ev.target.dataset.id;
   if (!act) return;
   if (act === 'run') {
-    const r = await fetch(`/api/jobs/${id}/run`, {method: 'POST'});
+    const r = await req(`/api/jobs/${id}/run`, {method: 'POST'});
     if (!r.ok) alert((await r.json()).error);
     setTimeout(refresh, 300);
   } else if (act === 'del') {
-    await fetch(`/api/jobs/${id}`, {method: 'DELETE'});
+    await req(`/api/jobs/${id}`, {method: 'DELETE'});
     refresh();
   } else if (act === 'runs') {
     showRuns(id, ev.target.dataset.name);
@@ -96,7 +121,8 @@ document.querySelector('#jobs').addEventListener('click', async (ev) => {
 
 async function showRuns(id, name) {
   document.querySelector('#runsTitle').textContent = 'Runs: ' + name;
-  const res = await fetch(`/api/jobs/${id}/runs?limit=20`);
+  const res = await req(`/api/jobs/${id}/runs?limit=20`);
+  if (!res.ok) return;
   const runs = await res.json();
   const tb = document.querySelector('#runs tbody');
   tb.innerHTML = '';
@@ -124,7 +150,7 @@ document.querySelector('#create').addEventListener('submit', async (ev) => {
     timeout_seconds: +f.timeout_seconds.value, max_retries: +f.max_retries.value,
     enabled: f.enabled.checked,
   };
-  const res = await fetch('/api/jobs', {
+  const res = await req('/api/jobs', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body),
   });
@@ -133,7 +159,7 @@ document.querySelector('#create').addEventListener('submit', async (ev) => {
 });
 
 const log = document.querySelector('#log');
-const es = new EventSource('/events');
+const es = new EventSource(authedURL('/events'));
 es.onmessage = (msg) => {
   const e = JSON.parse(msg.data);
   const line = `[${new Date(e.at).toLocaleTimeString()}] ${e.type} ` +
