@@ -70,6 +70,22 @@ func mkT(now string) time.Time {
 	return v.UTC()
 }
 
+// countRep counts reporter callbacks so tests can wait for observable
+// outcomes instead of racing goroutine scheduling.
+type countRep struct {
+	mu      sync.Mutex
+	started, finished, retries, next int
+}
+
+func (c *countRep) JobStarted(string)                 { c.mu.Lock(); c.started++; c.mu.Unlock() }
+func (c *countRep) JobFinished(string, string, time.Duration) {
+	c.mu.Lock(); c.finished++; c.mu.Unlock()
+}
+func (c *countRep) RetryScheduled(string, int)        { c.mu.Lock(); c.retries++; c.mu.Unlock() }
+func (c *countRep) NextRunSet(string, time.Duration)  { c.mu.Lock(); c.next++; c.mu.Unlock() }
+
+func (c *countRep) retried() int { c.mu.Lock(); defer c.mu.Unlock(); return c.retries }
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
@@ -88,11 +104,12 @@ func waitFor(t *testing.T, cond func() bool) {
 	t.Fatal("condition not met in time")
 }
 
-func setup(t *testing.T, opt Options, exec *fakeExec) (*store.DB, *clock.Fake, *Scheduler) {
+func setup(t *testing.T, opt Options, exec *fakeExec) (*store.DB, *clock.Fake, *countRep, *Scheduler) {
 	t.Helper()
 	db := openDB(t)
 	clk := clock.NewFake(mkT("2024-03-01T10:00:00Z"))
-	return db, clk, New(db, clk, exec, opt, nil)
+	cnt := &countRep{}
+	return db, clk, cnt, New(db, clk, exec, opt, cnt)
 }
 
 func createJob(t *testing.T, db *store.DB, name, schedule string, maxRetries int) store.Job {
@@ -164,8 +181,9 @@ func waitNext(t *testing.T, db *store.DB, name string, want time.Time) {
 func TestSchedulerFiresMinuteJob(t *testing.T) {
 	t.Parallel()
 	exec := &fakeExec{}
-	db, clk, s := setup(t, Options{PoolSize: 2, Log: testLogger()}, exec)
+	db, clk, cnt, s := setup(t, Options{PoolSize: 2, Log: testLogger()}, exec)
 	createJob(t, db, "every-minute", "* * * * *", 0)
+	_ = cnt
 
 	runScheduler(t, s)
 
@@ -200,7 +218,8 @@ func TestMissedPolicy(t *testing.T) {
 	t.Run("skip", func(t *testing.T) {
 		t.Parallel()
 		exec := &fakeExec{}
-		db, _, s := setup(t, Options{PoolSize: 2, Log: testLogger()}, exec)
+		db, _, cnt, s := setup(t, Options{PoolSize: 2, Log: testLogger()}, exec)
+	_ = cnt
 		j := createJob(t, db, "stale", "0 0 * * *", 0)
 		// Stored next_run is 3 days in the past.
 		past := mkT("2024-02-27T00:00:00Z")
@@ -219,7 +238,8 @@ func TestMissedPolicy(t *testing.T) {
 	t.Run("latest", func(t *testing.T) {
 		t.Parallel()
 		exec := &fakeExec{}
-		db, _, s := setup(t, Options{PoolSize: 2, Log: testLogger(), MissedPolicy: "latest"}, exec)
+		db, _, cnt, s := setup(t, Options{PoolSize: 2, Log: testLogger(), MissedPolicy: "latest"}, exec)
+	_ = cnt
 		j := createJob(t, db, "missed", "0 0 * * *", 0)
 		past := mkT("2024-02-27T00:00:00Z")
 		if err := db.SetRunTimes(context.Background(), j.ID, &past, &past); err != nil {
@@ -241,7 +261,8 @@ func TestMissedPolicy(t *testing.T) {
 	t.Run("catchup", func(t *testing.T) {
 		t.Parallel()
 		exec := &fakeExec{}
-		db, _, s := setup(t, Options{PoolSize: 2, Log: testLogger(), MissedPolicy: "catchup"}, exec)
+		db, _, cnt, s := setup(t, Options{PoolSize: 2, Log: testLogger(), MissedPolicy: "catchup"}, exec)
+	_ = cnt
 		j := createJob(t, db, "dailies", "0 0 * * *", 0)
 		past := mkT("2024-02-27T00:00:00Z")
 		if err := db.SetRunTimes(context.Background(), j.ID, &past, &past); err != nil {
@@ -260,15 +281,15 @@ func TestMissedPolicy(t *testing.T) {
 func TestRetryBackoffAndDeadLetter(t *testing.T) {
 	t.Parallel()
 	exec := &fakeExec{failN: 99} // always fails
-	db, clk, s := setup(t, Options{PoolSize: 2, Log: testLogger()}, exec)
+	db, clk, cnt, s := setup(t, Options{PoolSize: 2, Log: testLogger()}, exec)
 	createJob(t, db, "flaky", "* * * * *", 2) // 2 retries → 3 attempts total
 
 	runScheduler(t, s)
 	waitNext(t, db, "flaky", mkT("2024-03-01T10:01:00Z"))
 	clk.Advance(time.Minute)
-	waitFor(t, func() bool { return exec.size() >= 1 })
+	waitFor(t, func() bool { return exec.size() >= 1 && cnt.retried() >= 1 })
 	clk.Advance(2 * time.Second)
-	waitFor(t, func() bool { return len(mustRuns(t, db, 10)) == 2 })
+	waitFor(t, func() bool { return len(mustRuns(t, db, 10)) == 2 && cnt.retried() >= 2 })
 	clk.Advance(3 * time.Second)
 	waitFor(t, func() bool { return len(mustRuns(t, db, 10)) == 3 })
 	runs := mustRuns(t, db, 10)
@@ -288,15 +309,15 @@ func TestRetryBackoffAndDeadLetter(t *testing.T) {
 func TestRetrySucceedsMidWay(t *testing.T) {
 	t.Parallel()
 	exec := &fakeExec{failN: 2} // 3rd attempt succeeds
-	db, clk, s := setup(t, Options{PoolSize: 2, Log: testLogger()}, exec)
+	db, clk, cnt, s := setup(t, Options{PoolSize: 2, Log: testLogger()}, exec)
 	createJob(t, db, "halfway", "* * * * *", 5)
 
 	runScheduler(t, s)
 	waitNext(t, db, "halfway", mkT("2024-03-01T10:01:00Z"))
 	clk.Advance(time.Minute)
-	waitFor(t, func() bool { return exec.size() >= 1 })
+	waitFor(t, func() bool { return exec.size() >= 1 && cnt.retried() >= 1 })
 	clk.Advance(2 * time.Second)
-	waitFor(t, func() bool { return exec.size() >= 2 })
+	waitFor(t, func() bool { return exec.size() >= 2 && cnt.retried() >= 2 })
 	clk.Advance(3 * time.Second)
 	waitFor(t, func() bool { return exec.size() >= 3 })
 
@@ -314,8 +335,9 @@ func TestRetrySucceedsMidWay(t *testing.T) {
 func TestSchedulerDrain(t *testing.T) {
 	t.Parallel()
 	exec := &fakeExec{blockC: make(chan struct{})}
-	db, clk, s := setup(t, Options{PoolSize: 1, Log: testLogger()}, exec)
+	db, clk, cnt, s := setup(t, Options{PoolSize: 1, Log: testLogger()}, exec)
 	createJob(t, db, "minute", "* * * * *", 0)
+	_ = cnt
 	runScheduler(t, s)
 	waitNext(t, db, "minute", mkT("2024-03-01T10:01:00Z"))
 	clk.Advance(time.Minute)
@@ -327,8 +349,9 @@ func TestSchedulerDrain(t *testing.T) {
 func TestRunNowImmediate(t *testing.T) {
 	t.Parallel()
 	exec := &fakeExec{}
-	db, clk, s := setup(t, Options{PoolSize: 2, Log: testLogger()}, exec)
+	db, clk, cnt, s := setup(t, Options{PoolSize: 2, Log: testLogger()}, exec)
 	j := createJob(t, db, "manual", "0 0 1 1 *", 0)
+	_ = cnt
 	runScheduler(t, s)
 
 	if err := s.RunNow(context.Background(), j.ID); err != nil {
@@ -341,8 +364,9 @@ func TestRunNowImmediate(t *testing.T) {
 func TestRunNowGuardsInFlight(t *testing.T) {
 	t.Parallel()
 	exec := &fakeExec{blockC: make(chan struct{})}
-	db, clk, s := setup(t, Options{PoolSize: 1, Log: testLogger()}, exec)
+	db, clk, cnt, s := setup(t, Options{PoolSize: 1, Log: testLogger()}, exec)
 	j := createJob(t, db, "busy", "0 0 1 1 *", 0)
+	_ = cnt
 	runScheduler(t, s)
 	if err := s.RunNow(context.Background(), j.ID); err != nil {
 		t.Fatalf("first: %v", err)

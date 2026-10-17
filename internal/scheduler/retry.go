@@ -27,12 +27,14 @@ func NewRetryQueue(clk clock.Clock, deliver func(Task), observe func(Task, int))
 // SetRunCtx stops retry timers when the scheduler loop winds down.
 func (r *RetryQueue) SetRunCtx(ctx context.Context) { r.ctx = ctx }
 
-// Arm schedules the next attempt after delay.
+// Arm schedules the next attempt after delay. The timer is registered
+// synchronously before the observe callback returns, so callers that
+// wait for observed retries know the FakeClock timer already exists.
 func (r *RetryQueue) Arm(t Task, delay time.Duration) {
+	timer := r.clk.NewTimer(delay)
 	if r.observe != nil {
 		r.observe(t, t.Attempt)
 	}
-	timer := r.clk.NewTimer(delay)
 	go func() {
 		select {
 		case <-r.ctx.Done():

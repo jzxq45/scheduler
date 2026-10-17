@@ -20,6 +20,7 @@ import (
 	"scheduler/internal/clock"
 	"scheduler/internal/config"
 	"scheduler/internal/metrics"
+	"scheduler/internal/retention"
 	"scheduler/internal/scheduler"
 	"scheduler/internal/store"
 )
@@ -128,6 +129,11 @@ func run() error {
 	// Scheduler drains its pool when gctx is cancelled.
 	g.Go(func() error {
 		return sched.Run(gctx)
+	})
+
+	// Self-hosted cleanup: purge runs older than the retention window.
+	g.Go(func() error {
+		return retention.New(db, clock.Real{}, cfg.RetentionDays, logger).Run(gctx)
 	})
 
 	return g.Wait()
