@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scheduler</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; background: #f7f7f9; color: #222; }
+  h1 { font-size: 1.4rem; }
+  table { border-collapse: collapse; width: 100%; background: #fff; }
+  th, td { border: 1px solid #ddd; padding: .45rem .7rem; text-align: left; font-size: .9rem; }
+  th { background: #eee; }
+  button { margin-right: .3rem; cursor: pointer; }
+  form, aside { background: #fff; border: 1px solid #ddd; padding: 1rem; margin-top: 1.5rem; max-width: 560px; }
+  label { display: block; margin-top: .5rem; font-size: .85rem; }
+  input { width: 100%; box-sizing: border-box; padding: .3rem; }
+  #log { background: #111; color: #9f9; font-family: monospace; font-size: .8rem;
+         height: 220px; overflow-y: auto; padding: .5rem; margin-top: 1.5rem; }
+  .status-success { color: #0a0; } .status-failed, .status-failed_final { color: #c00; }
+  .status-timeout { color: #c60; } .status-running { color: #06c; }
+  aside { position: relative; }
+  aside .close { position: absolute; top: .3rem; right: .6rem; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>Cron jobs</h1>
+<table id="jobs">
+  <thead><tr>
+    <th>Name</th><th>Schedule</th><th>Enabled</th><th>Last run</th>
+    <th>Next run</th><th>Actions</th>
+  </tr></thead>
+  <tbody></tbody>
+</table>
+
+<form id="create">
+  <h2>New job</h2>
+  <label>Name <input name="name" required></label>
+  <label>Schedule (cron, e.g. */5 * * * *) <input name="schedule" required></label>
+  <label>Command <input name="command" required></label>
+  <label>Payload (stdin, optional) <input name="payload"></label>
+  <label>Timezone <input name="timezone" value="UTC"></label>
+  <label>Timeout (sec) <input name="timeout_seconds" type="number" value="300"></label>
+  <label>Max retries <input name="max_retries" type="number" value="0"></label>
+  <label>Enabled <input name="enabled" type="checkbox" checked></label>
+  <p><button type="submit">Create</button></p>
+  <p id="createErr" style="color:#c00"></p>
+</form>
+
+<aside id="runsPane" style="display:none">
+  <span class="close" id="runsClose">&times;</span>
+  <h2 id="runsTitle"></h2>
+  <table id="runs"><thead><tr>
+    <th>Started</th><th>Status</th><th>Attempt</th><th>Output / error</th>
+  </tr></thead><tbody></tbody></table>
+</aside>
+
+<div id="log"><div>— live events (SSE) —</div></div>
+
+<script>
+async function refresh() {
+  const res = await fetch('/api/jobs');
+  const jobs = await res.json();
+  const tb = document.querySelector('#jobs tbody');
+  tb.innerHTML = '';
+  for (const j of jobs) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(j.name)}</td><td><code>${esc(j.schedule)}</code></td>` +
+      `<td>${j.enabled ? 'yes' : 'no'}</td><td>${esc(j.last_run_at || '—')}</td>` +
+      `<td>${esc(j.next_run_at || '—')}</td>` +
+      `<td><button data-act="run" data-id="${j.id}">Run now</button>` +
+      `<button data-act="runs" data-id="${j.id}" data-name="${esc(j.name)}">Runs</button>` +
+      `<button data-act="del" data-id="${j.id}">Delete</button></td>`;
+    tb.appendChild(tr);
+  }
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+document.querySelector('#jobs').addEventListener('click', async (ev) => {
+  const act = ev.target.dataset.act, id = ev.target.dataset.id;
+  if (!act) return;
+  if (act === 'run') {
+    const r = await fetch(`/api/jobs/${id}/run`, {method: 'POST'});
+    if (!r.ok) alert((await r.json()).error);
+    setTimeout(refresh, 300);
+  } else if (act === 'del') {
+    await fetch(`/api/jobs/${id}`, {method: 'DELETE'});
+    refresh();
+  } else if (act === 'runs') {
+    showRuns(id, ev.target.dataset.name);
+  }
+});
+
+async function showRuns(id, name) {
+  document.querySelector('#runsTitle').textContent = 'Runs: ' + name;
+  const res = await fetch(`/api/jobs/${id}/runs?limit=20`);
+  const runs = await res.json();
+  const tb = document.querySelector('#runs tbody');
+  tb.innerHTML = '';
+  for (const r of runs) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(r.started_at)}</td>` +
+      `<td class="status-${esc(r.status)}">${esc(r.status)}${r.attempt > 1 ? ' (try ' + r.attempt + ')' : ''}</td>` +
+      `<td>${r.attempt}</td>` +
+      `<td><pre style="white-space:pre-wrap;margin:0">${esc((r.output || '') + (r.error ? '\nERR: ' + r.error : ''))}</pre></td>`;
+    tb.appendChild(tr);
+  }
+  document.querySelector('#runsPane').style.display = '';
+}
+document.querySelector('#runsClose').onclick = () => {
+  document.querySelector('#runsPane').style.display = 'none';
+};
+
+document.querySelector('#create').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const f = ev.target, err = document.querySelector('#createErr');
+  err.textContent = '';
+  const body = {
+    name: f.name.value, schedule: f.schedule.value, command: f.command.value,
+    payload: f.payload.value, timezone: f.timezone.value,
+    timeout_seconds: +f.timeout_seconds.value, max_retries: +f.max_retries.value,
+    enabled: f.enabled.checked,
+  };
+  const res = await fetch('/api/jobs', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  if (res.ok) { f.reset(); refresh(); }
+  else err.textContent = (await res.json()).error;
+});
+
+const log = document.querySelector('#log');
+const es = new EventSource('/events');
+es.onmessage = (msg) => {
+  const e = JSON.parse(msg.data);
+  const line = `[${new Date(e.at).toLocaleTimeString()}] ${e.type} ` +
+    `${e.job}${e.status ? ' → ' + e.status : ''}` +
+    `${e.duration_ms ? ' (' + e.duration_ms + ' ms)' : ''}` +
+    `${e.attempt ? ' (try ' + e.attempt + ')' : ''}` +
+    `${e.next_in_ms ? ' in ' + (e.next_in_ms / 1000).toFixed(0) + 's' : ''}`;
+  const d = document.createElement('div');
+  d.textContent = line;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+};
+
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>
