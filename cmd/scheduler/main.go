@@ -19,9 +19,38 @@ import (
 	"scheduler/internal/api"
 	"scheduler/internal/clock"
 	"scheduler/internal/config"
+	"scheduler/internal/metrics"
 	"scheduler/internal/scheduler"
 	"scheduler/internal/store"
 )
+
+// reporterFan sends scheduler events to every subscriber: SSE hub and
+// Prometheus registry both implement scheduler.Reporter.
+type reporterFan []scheduler.Reporter
+
+func (f reporterFan) JobStarted(name string) {
+	for _, r := range f {
+		r.JobStarted(name)
+	}
+}
+
+func (f reporterFan) JobFinished(name, status string, d time.Duration) {
+	for _, r := range f {
+		r.JobFinished(name, status, d)
+	}
+}
+
+func (f reporterFan) RetryScheduled(name string, attempt int) {
+	for _, r := range f {
+		r.RetryScheduled(name, attempt)
+	}
+}
+
+func (f reporterFan) NextRunSet(name string, d time.Duration) {
+	for _, r := range f {
+		r.NextRunSet(name, d)
+	}
+}
 
 // drainTimeout bounds HTTP shutdown; job drain is bounded separately
 // by the scheduler's DrainTimeout.
@@ -57,18 +86,25 @@ func run() error {
 
 	// Build the SSE hub first, so runs stream from the first tick.
 	broker := api.NewBroker()
-	rep := api.NewReporter(broker)
+	reg := metrics.New()
+	reps := reporterFan{api.NewReporter(broker), reg}
 	sched := scheduler.New(db, clock.Real{}, scheduler.ShellExecutor{},
 		scheduler.Options{
 			PoolSize:     cfg.WorkerPoolSize,
 			MissedPolicy: cfg.MissedPolicy,
 			DrainTimeout: drainTimeout,
 			Log:          logger,
-		}, rep)
+		}, reps)
+
+	apiSrv := api.New(db, sched, logger, broker)
+	apiSrv.MetricsHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", metrics.ServerContent)
+		_, _ = w.Write([]byte(reg.Render()))
+	}))
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           api.New(db, sched, logger, broker),
+		Handler:           apiSrv,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

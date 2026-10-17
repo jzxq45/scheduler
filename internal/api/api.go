@@ -54,6 +54,13 @@ func New(db *store.DB, sched RunStarter, log *slog.Logger, b *Broker) *Server {
 // Broker exposes the SSE hub so the scheduler Reporter can publish.
 func (s *Server) Broker() *Broker { return s.broker }
 
+// MetricsHandler registers an extra GET route (used for /metrics).
+// Must be called before the server starts serving.
+func (s *Server) MetricsHandler(h http.Handler) {
+	s.mux.Handle("GET /metrics", h)
+}
+
+
 func (s *Server) routes() {
 	mux := http.NewServeMux()
 
