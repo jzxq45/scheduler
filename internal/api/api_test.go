@@ -122,6 +122,27 @@ func TestBearerAuth(t *testing.T) {
 	}
 }
 
+// TestUIRenderSmoke guards the dashboard template: it must render and
+// ship the quote-escaping esc() so job names cannot break HTML
+// attributes (stored-XSS fix).
+func TestUIRenderSmoke(t *testing.T) {
+	s, _, _ := testServer(t)
+	rec, body := do(t, s, "GET", "/", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ui: %d", rec.Code)
+	}
+	html := string(body)
+	if !strings.Contains(html, `&quot;`) {
+		t.Errorf("esc() does not escape double quotes")
+	}
+	if !strings.Contains(html, `&#39;`) {
+		t.Errorf("esc() does not escape single quotes")
+	}
+	if !strings.Contains(html, `data-name="${esc(j.name)}"`) {
+		t.Errorf("attribute injection guard missing")
+	}
+}
+
 func TestJobCRUD(t *testing.T) {
 	s, db, _ := testServer(t)
 

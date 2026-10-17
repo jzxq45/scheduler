@@ -101,7 +101,10 @@ async function refresh() {
 function esc(s) {
   const d = document.createElement('div');
   d.textContent = String(s);
-  return d.innerHTML;
+  // innerHTML serialization leaves quotes intact; replacing them means
+  // a hostile value cannot break out of an HTML attribute context
+  // (e.g. data-name="<script…>").
+  return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 document.querySelector('#jobs').addEventListener('click', async (ev) => {
