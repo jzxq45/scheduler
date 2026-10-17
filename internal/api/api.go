@@ -316,14 +316,23 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// events streams live run activity as Server-Sent Events.
+// events streams live run activity as Server-Sent Events. It caps the
+// number of concurrent subscribers and exits as soon as the client
+// stops reading (write error or context done).
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	events, cancel := s.broker.Subscribe()
+	events, cancel, err := s.broker.Subscribe()
+	if err != nil {
+		// 503 with Retry-After: the stream is a convenience, not a
+		// contract, and reconnecting browsers will retry anyway.
+		w.Header().Set("Retry-After", "10")
+		httpError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
 	defer cancel()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -343,10 +352,15 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				// Client is gone: stop streaming, free the slot.
+				return
+			}
 			fl.Flush()
 		case <-beat.C:
-			fmt.Fprint(w, ": ping\n\n")
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
 			fl.Flush()
 		}
 	}

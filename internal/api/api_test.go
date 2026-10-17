@@ -301,6 +301,35 @@ func TestRunHistory(t *testing.T) {
 	}
 }
 
+// TestSSESubscriberCap: the broker refuses subscribers past its cap
+// so long-lived streams cannot exhaust resources; freed slots are
+// reusable.
+func TestSSESubscriberCap(t *testing.T) {
+	b := NewBroker()
+	b.setMax(2)
+
+	ch1, cancel1, err := b.Subscribe()
+	if err != nil || ch1 == nil {
+		t.Fatalf("first: %v", err)
+	}
+	if _, cancel2, err := b.Subscribe(); err != nil {
+		t.Fatalf("second: %v", err)
+	} else {
+		defer cancel2()
+	}
+	if _, _, err := b.Subscribe(); err == nil {
+		t.Fatal("third subscriber must fail")
+	}
+
+	// Cancelling frees the slot.
+	cancel1()
+	if _, cancel3, err := b.Subscribe(); err != nil {
+		t.Fatalf("after cancel: %v", err)
+	} else {
+		cancel3()
+	}
+}
+
 func TestSSEStream(t *testing.T) {
 	s, _, _ := testServer(t)
 	b := s.Broker()
