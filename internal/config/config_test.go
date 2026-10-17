@@ -15,6 +15,19 @@ func write(t *testing.T, content string) string {
 	return path
 }
 
+// TestLoadMissingFileUsesDefaultsAndEnv: no config.yaml is fine
+// (containers rely on SCHEDULER_* env).
+func TestLoadMissingFile(t *testing.T) {
+	t.Parallel()
+	cfg, err := Load(filepath.Join(t.TempDir(), "absent.yaml"))
+	if err != nil {
+		t.Fatalf("missing file should not fail: %v", err)
+	}
+	if cfg != defaults() {
+		t.Errorf("got %+v, want %+v", cfg, defaults())
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
 	t.Parallel()
 	cfg, err := Load(write(t, "listen: \"0.0.0.0:8081\"\ndb_path: scheduler.db\nworker_pool_size: 10\nretention_days: 30\nlog_level: info\nmissed_policy: skip\n"))

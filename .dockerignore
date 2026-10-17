@@ -1,0 +1,8 @@
+bin/
+db/
+scheduler.db*
+*.md
+.github/
+.git/
+.env
+config.yaml

@@ -2,7 +2,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -37,17 +39,21 @@ func defaults() Config {
 }
 
 // Load reads config from path (flat "key: value" YAML), then applies
-// SCHEDULER_* env overrides. Unknown env vars are ignored; unknown YAML
-// keys are an error so typos in config.yaml fail fast.
+// SCHEDULER_* env overrides. A missing config file is not an error:
+// defaults and env overrides still apply (12-factor / container
+// setups). Unknown env vars are ignored; unknown YAML keys are an
+// error so typos in config.yaml fail fast.
 func Load(path string) (Config, error) {
 	cfg := defaults()
 
 	raw, err := os.ReadFile(path)
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return cfg, fmt.Errorf("load config: %w", err)
 	}
-	if err := applyYAML(&cfg, raw); err != nil {
-		return cfg, fmt.Errorf("load config: %w", err)
+	if err == nil {
+		if err := applyYAML(&cfg, raw); err != nil {
+			return cfg, fmt.Errorf("load config: %w", err)
+		}
 	}
 	if err := applyEnv(&cfg, os.Environ()); err != nil {
 		return cfg, fmt.Errorf("load config: %w", err)
