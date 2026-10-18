@@ -94,13 +94,15 @@ func (p *Pool) worker(ctx context.Context, i int) {
 	}
 }
 
-// Enqueue hands a task to a worker, non-blocking. It refuses work
-// once Stop has closed the queue (checked under RLock).
+// Enqueue hands a task to a worker, non-blocking. The stopped check
+// and the send happen under the SAME RLock: Stop takes the Lock before
+// closing the queue, so close() cannot interleave between check and
+// send — the send-on-closed-channel race window is gone.
 func (p *Pool) Enqueue(t Task) {
 	p.mu.RLock()
-	stopped := p.stopped
-	p.mu.RUnlock()
-	if stopped {
+	defer p.mu.RUnlock()
+	if p.stopped {
+		// Draining: refuse work.
 		p.release2(t.StoreJob.ID)
 		return
 	}
@@ -112,7 +114,9 @@ func (p *Pool) Enqueue(t Task) {
 	}
 }
 
-// Stop flags the pool closed and closes the queue exactly once.
+// Stop flags the pool closed and closes the queue exactly once. It
+// waits for the Lock, so in-flight Enqueues holding RLock finish their
+// send first.
 func (p *Pool) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()

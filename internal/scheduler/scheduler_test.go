@@ -503,6 +503,41 @@ func TestEnqueueAfterDrain(t *testing.T) {
 	}
 }
 
+// TestStopEnqueueRace hammers the exact race window the audit flagged:
+// concurrent Enqueue/Close under -race must never panic with
+// send-on-closed-channel.
+func TestStopEnqueueRace(t *testing.T) {
+	t.Parallel()
+	exec := &fakeExec{}
+	db := openDB(t)
+	clk := clock.NewFake(mkT("2024-03-01T10:00:00Z"))
+	pool := NewPool(2, exec, db, clk, testLogger(), noopReporter{}, func(int64) {})
+	pool.SetRetry(func(context.Context, Task, time.Duration) {})
+	ctx, cancel := context.WithCancel(context.Background())
+	pool.Start(ctx)
+
+	j := createJob(t, db, "missile", "* * * * *", 0)
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for k := 0; k < 20; k++ {
+				pool.Enqueue(Task{StoreJob: j, Attempt: 1})
+				runtime.Gosched()
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pool.Stop()
+	}()
+	wg.Wait()
+	cancel()
+	pool.Drain(time.Second)
+}
+
 func TestBackoffDelays(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
