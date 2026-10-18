@@ -229,7 +229,14 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.broker.Publish(Event{Type: "job_created", Job: j.Name, At: time.Now()})
-	created, _ := s.db.GetJob(r.Context(), id)
+	created, err := s.db.GetJob(r.Context(), id)
+	if err != nil {
+		// Failure reading back what we just wrote is a 500, not a
+		// silent zero-value DTO with a meaningless id.
+		s.log.Error("reload created job", "job", j.Name, "err", err)
+		httpError(w, http.StatusInternalServerError, "job created but reload failed")
+		return
+	}
 	writeJSON(w, http.StatusCreated, toDTO(created))
 }
 

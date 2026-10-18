@@ -240,7 +240,10 @@ func nullTime(v sql.NullInt64) *time.Time {
 	return &t
 }
 
-// UpdateJob rewrites the mutable fields of j.
+// UpdateJob rewrites the mutable fields of j. last_run_at is NOT
+// here on purpose: it is owned by the claim path (SetRunTimes /
+// ClaimJob), and API clients never send it — writing it would wipe
+// the run history pointer on every job edit.
 func (db *DB) UpdateJob(ctx context.Context, j *Job) error {
 	j.UpdatedAt = time.Now()
 	en := 0
@@ -249,9 +252,9 @@ func (db *DB) UpdateJob(ctx context.Context, j *Job) error {
 	}
 	res, err := db.ExecContext(ctx,
 		`UPDATE jobs SET name=?, schedule=?, command=?, payload=?, enabled=?, timezone=?,
-		 timeout_seconds=?, max_retries=?, updated_at=?, last_run_at=?, next_run_at=? WHERE id=?`,
+		 timeout_seconds=?, max_retries=?, updated_at=?, next_run_at=? WHERE id=?`,
 		j.Name, j.Schedule, j.Command, j.Payload, en, j.Timezone,
-		j.TimeoutSeconds, j.MaxRetries, ms(j.UpdatedAt), ptrMS(j.LastRunAt), ptrMS(j.NextRunAt), j.ID)
+		j.TimeoutSeconds, j.MaxRetries, ms(j.UpdatedAt), ptrMS(j.NextRunAt), j.ID)
 	if err != nil {
 		if containsIgnoreCase(err.Error(), "UNIQUE constraint failed") {
 			return fmt.Errorf("update job: %w", ErrDuplicate)

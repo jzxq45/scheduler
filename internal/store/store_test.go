@@ -67,12 +67,13 @@ func TestJobCRUD(t *testing.T) {
 		t.Fatalf("page 2: %v %d", err, len(page2))
 	}
 
-	// Update
+	// Update: user-visible fields change; last_run_at is owned by the
+	// claim path and must not be overwritten by edits.
 	got.Enabled = false
 	got.MaxRetries = 5
 	lr := time.UnixMilli(12345).UTC()
 	nr := time.UnixMilli(54321).UTC()
-	got.LastRunAt, got.NextRunAt = &lr, &nr
+	got.NextRunAt = &nr
 	if err := db.UpdateJob(ctx, &got); err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -80,9 +81,26 @@ func TestJobCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Enabled || u.MaxRetries != 5 || u.LastRunAt == nil || u.NextRunAt == nil ||
-		u.LastRunAt.UnixMilli() != 12345 {
+	if u.Enabled || u.MaxRetries != 5 || u.NextRunAt == nil ||
+		u.NextRunAt.UnixMilli() != 54321 {
 		t.Errorf("updated: %+v", u)
+	}
+
+	// Editing a job that already ran must keep last_run_at.
+	if err := db.SetRunTimes(ctx, id, &lr, &nr); err != nil {
+		t.Fatal(err)
+	}
+	renamed := u
+	renamed.Name = "a2"
+	if err := db.UpdateJob(ctx, &renamed); err != nil {
+		t.Fatal(err)
+	}
+	v, err := db.GetJob(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.LastRunAt == nil || v.LastRunAt.UnixMilli() != 12345 {
+		t.Errorf("last_run_at lost on update: %+v", v)
 	}
 
 	// Delete runs nuke job and runs cascade.
