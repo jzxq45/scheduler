@@ -463,20 +463,3 @@ func (db *DB) DeleteRunsBefore(ctx context.Context, cutoff time.Time) (int64, er
 	}
 	return n, nil
 }
-
-// LastRunDuration returns StartAt/FinishedAt of the most recent
-// completed run for a job; used for duration metrics.
-func (db *DB) LastRunDuration(ctx context.Context, jobID int64) (time.Duration, error) {
-	row := db.QueryRowContext(ctx,
-		`SELECT started_at, finished_at FROM runs WHERE job_id=? AND finished_at IS NOT NULL
-		 ORDER BY id DESC LIMIT 1`, jobID)
-	var started int64
-	var finished sql.NullInt64
-	if err := row.Scan(&started, &finished); err != nil {
-		if err == sql.ErrNoRows {
-			return 0, fmt.Errorf("last run duration: %w", ErrNotFound)
-		}
-		return 0, fmt.Errorf("last run duration: %w", err)
-	}
-	return time.UnixMilli(finished.Int64).Sub(time.UnixMilli(started)), nil
-}

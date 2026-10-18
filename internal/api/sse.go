@@ -18,13 +18,13 @@ const maxSubscribers = 50
 // Event is one item on the SSE stream: a small snapshot of scheduler
 // activity. DurationMs is optional and filled for run_finish events.
 type Event struct {
-	Type       string    `json:"type"` // run_started, run_finished, run_retry, run_triggered, next_run, job_created/updated/deleted
-	Job        string    `json:"job"`
-	Status     string    `json:"status,omitempty"`
-	Attempt    int       `json:"attempt,omitempty"`
-	DurMs      int64     `json:"duration_ms,omitempty"`
-	NextInMs   int64     `json:"next_in_ms,omitempty"`
-	At         time.Time `json:"at"`
+	Type     string    `json:"type"` // run_started, run_finished, run_retry, run_triggered, next_run, job_created/updated/deleted
+	Job      string    `json:"job"`
+	Status   string    `json:"status,omitempty"`
+	Attempt  int       `json:"attempt,omitempty"`
+	DurMs    int64     `json:"duration_ms,omitempty"`
+	NextInMs int64     `json:"next_in_ms,omitempty"`
+	At       time.Time `json:"at"`
 }
 
 // Broker fans scheduler events out to any number of capped SSE

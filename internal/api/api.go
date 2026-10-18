@@ -28,11 +28,11 @@ type RunStarter interface {
 
 // Server serves the API and the web UI.
 type Server struct {
-	db    *store.DB
-	sched RunStarter
-	log   *slog.Logger
+	db     *store.DB
+	sched  RunStarter
+	log    *slog.Logger
 	broker *Broker
-	mux   *http.ServeMux
+	mux    *http.ServeMux
 	// token, when non-empty, is required via
 	// "Authorization: Bearer <token>" (or "?token=" for EventSource,
 	// which cannot set custom headers).
@@ -118,7 +118,6 @@ func (s *Server) MetricsHandler(h http.Handler) {
 	s.mux.Handle("GET /metrics", h)
 }
 
-
 func (s *Server) routes() {
 	mux := http.NewServeMux()
 
@@ -203,8 +202,8 @@ const maxJobBody = 1 << 20
 // Range caps for per-job fields; reject nonsense outright instead of
 // letting the worker pool guess.
 const (
-	maxTimeoutSeconds  = 24 * 60 * 60
-	maxRetriesAllowed  = 32
+	maxTimeoutSeconds = 24 * 60 * 60
+	maxRetriesAllowed = 32
 )
 
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
@@ -542,6 +541,14 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// httpError writes a JSON error body. 4xx carry the reason (client
+// can act on it); 5xx carry a generic message — internal details such
+// as raw SQLite errors must not leak to the client. Callers that need
+// the specifics log them separately.
 func httpError(w http.ResponseWriter, code int, msg string) {
+	if code >= 500 {
+		writeJSON(w, code, map[string]string{"error": "internal error"})
+		return
+	}
 	writeJSON(w, code, map[string]string{"error": msg})
 }

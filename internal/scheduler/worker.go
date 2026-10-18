@@ -44,8 +44,7 @@ type Pool struct {
 	release func(jobID int64)
 	retry   func(context.Context, Task, time.Duration)
 
-	wg      sync.WaitGroup
-	started bool
+	wg sync.WaitGroup
 }
 
 // NewPool wires a pool; Drain closes the queue.
@@ -74,7 +73,6 @@ func (p *Pool) Start(ctx context.Context) {
 		p.wg.Add(1)
 		go p.worker(ctx, i)
 	}
-	p.started = true
 }
 
 func capFor(p *Pool) int { return cap(p.queue) / 4 }

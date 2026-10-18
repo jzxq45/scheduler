@@ -282,11 +282,15 @@ func (s *Scheduler) shutdown(ctx context.Context) error {
 }
 
 // RunNow starts job id immediately (HTTP "Run now"). It respects the
-// in-flight guard.
+// in-flight guard, and refuses disabled jobs: the schedule says no;
+// a manual trigger must be an explicit re-enable, not a footgun.
 func (s *Scheduler) RunNow(ctx context.Context, jobID int64) error {
 	j, err := s.db.GetJob(ctx, jobID)
 	if err != nil {
 		return fmt.Errorf("run now: %w", err)
+	}
+	if !j.Enabled {
+		return fmt.Errorf("run now: job %q is disabled", j.Name)
 	}
 	s.mu.Lock()
 	busy := s.inflight[j.ID]

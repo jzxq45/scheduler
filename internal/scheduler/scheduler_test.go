@@ -73,16 +73,18 @@ func mkT(now string) time.Time {
 // countRep counts reporter callbacks so tests can wait for observable
 // outcomes instead of racing goroutine scheduling.
 type countRep struct {
-	mu      sync.Mutex
+	mu                               sync.Mutex
 	started, finished, retries, next int
 }
 
-func (c *countRep) JobStarted(string)                 { c.mu.Lock(); c.started++; c.mu.Unlock() }
+func (c *countRep) JobStarted(string) { c.mu.Lock(); c.started++; c.mu.Unlock() }
 func (c *countRep) JobFinished(string, string, time.Duration) {
-	c.mu.Lock(); c.finished++; c.mu.Unlock()
+	c.mu.Lock()
+	c.finished++
+	c.mu.Unlock()
 }
-func (c *countRep) RetryScheduled(string, int)        { c.mu.Lock(); c.retries++; c.mu.Unlock() }
-func (c *countRep) NextRunSet(string, time.Duration)  { c.mu.Lock(); c.next++; c.mu.Unlock() }
+func (c *countRep) RetryScheduled(string, int)       { c.mu.Lock(); c.retries++; c.mu.Unlock() }
+func (c *countRep) NextRunSet(string, time.Duration) { c.mu.Lock(); c.next++; c.mu.Unlock() }
 
 func (c *countRep) retried() int { c.mu.Lock(); defer c.mu.Unlock(); return c.retries }
 
@@ -224,7 +226,7 @@ func TestMissedPolicy(t *testing.T) {
 		t.Parallel()
 		exec := &fakeExec{}
 		db, _, cnt, s := setup(t, Options{PoolSize: 2, Log: testLogger()}, exec)
-	_ = cnt
+		_ = cnt
 		j := createJob(t, db, "stale", "0 0 * * *", 0)
 		// Stored next_run is 3 days in the past.
 		past := mkT("2024-02-27T00:00:00Z")
@@ -244,7 +246,7 @@ func TestMissedPolicy(t *testing.T) {
 		t.Parallel()
 		exec := &fakeExec{}
 		db, _, cnt, s := setup(t, Options{PoolSize: 2, Log: testLogger(), MissedPolicy: "latest"}, exec)
-	_ = cnt
+		_ = cnt
 		j := createJob(t, db, "missed", "0 0 * * *", 0)
 		past := mkT("2024-02-27T00:00:00Z")
 		if err := db.SetRunTimes(context.Background(), j.ID, &past, &past); err != nil {
@@ -267,7 +269,7 @@ func TestMissedPolicy(t *testing.T) {
 		t.Parallel()
 		exec := &fakeExec{}
 		db, _, cnt, s := setup(t, Options{PoolSize: 2, Log: testLogger(), MissedPolicy: "catchup"}, exec)
-	_ = cnt
+		_ = cnt
 		j := createJob(t, db, "dailies", "0 0 * * *", 0)
 		past := mkT("2024-02-27T00:00:00Z")
 		if err := db.SetRunTimes(context.Background(), j.ID, &past, &past); err != nil {
@@ -427,6 +429,28 @@ func TestRunNowGuardsInFlight(t *testing.T) {
 }
 
 // ---- worker / executor ----
+
+// RunNow refuses disabled jobs: the schedule says no, a manual
+// trigger should not be a shadow way to run off-schedule.
+func TestRunNowDisabled(t *testing.T) {
+	t.Parallel()
+	exec := &fakeExec{}
+	db, _, cnt, s := setup(t, Options{PoolSize: 1, Log: testLogger()}, exec)
+	j := createJob(t, db, "asleep", "* * * * *", 0)
+	_ = cnt
+	j.Enabled = false
+	if err := db.UpdateJob(context.Background(), &j); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunNow(context.Background(), j.ID); err == nil {
+		t.Fatal("RunNow on disabled job must fail")
+	} else if !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("error = %v", err)
+	}
+	if exec.size() != 0 {
+		t.Errorf("disabled job executed %d times", exec.size())
+	}
+}
 
 func TestWorkerExecutesTask(t *testing.T) {
 	t.Parallel()

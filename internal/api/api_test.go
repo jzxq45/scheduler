@@ -305,7 +305,10 @@ func TestValidation(t *testing.T) {
 	}
 
 	// Range validation.
-	ranges := []struct{ name string; dto JobDTO }{
+	ranges := []struct {
+		name string
+		dto  JobDTO
+	}{
 		{"timeout zero", jobBody("x", "* * * * *", true)},
 		{"huge retries", jobBody("x", "* * * * *", true)},
 	}
