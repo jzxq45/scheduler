@@ -397,6 +397,91 @@ func TestSchedulerDrain(t *testing.T) {
 	}
 }
 
+// TestStopJobCancelsRunning: deleting/disabling a running job aborts
+// its execution and records an explicit skipped status — commands
+// never outlive their job.
+func TestStopJobCancelsRunning(t *testing.T) {
+	t.Parallel()
+	exec := &fakeExec{blockC: make(chan struct{})}
+	db, clk, cnt, s := setup(t, Options{PoolSize: 1, Log: testLogger()}, exec)
+	j := createJob(t, db, "haunted", "* * * * *", 0)
+	_ = cnt
+	runScheduler(t, s)
+	waitNext(t, clk, db, "haunted", mkT("2024-03-01T10:01:00Z"))
+	clk.Advance(time.Minute)
+	waitFor(t, func() bool { return exec.size() >= 1 })
+
+	// Deletion/disable path takes StopJob; abort the running command.
+	s.StopJob(j.ID)
+	waitFor(t, func() bool {
+		runs := mustRuns(t, db, 10)
+		return len(runs) == 1 && runs[0].Status == store.StatusSkipped &&
+			strings.Contains(runs[0].Error, "deleted or disabled")
+	})
+
+	// The guard is freed: the job can be triggered again.
+	if err := s.RunNow(context.Background(), j.ID); err != nil {
+		t.Fatalf("RunNow after stop: %v", err)
+	}
+}
+
+// TestStopJobKillsArmedRetries: cancelling after a failure removes the
+// pending retry timer; the chain never runs again.
+func TestStopJobKillsArmedRetries(t *testing.T) {
+	t.Parallel()
+	exec := &fakeExec{failN: 99}
+	db, clk, cnt, s := setup(t, Options{PoolSize: 1, Log: testLogger()}, exec)
+	j := createJob(t, db, "chain", "* * * * *", 4)
+	runScheduler(t, s)
+	waitNext(t, clk, db, "chain", mkT("2024-03-01T10:01:00Z"))
+	clk.Advance(time.Minute)
+	waitFor(t, func() bool { return exec.size() >= 1 && cnt.retried() >= 1 })
+
+	// Stop before the 1s retry backoff elapses; advancing the fake
+	// clock must not deliver anything.
+	s.StopJob(j.ID)
+	for i := 0; i < 5; i++ {
+		clk.Advance(time.Minute)
+	}
+	if n := exec.size(); n != 1 {
+		t.Errorf("exec calls after StopJob = %d, want 1", n)
+	}
+}
+
+// TestRunDropsDeletedJob: a task queued for a job that is deleted
+// before a worker picks it up must not execute its command.
+func TestRunDropsDeletedJob(t *testing.T) {
+	t.Parallel()
+	exec := &fakeExec{blockC: make(chan struct{})}
+	db := openDB(t)
+	clk := clock.NewFake(mkT("2024-03-01T10:00:00Z"))
+	pool := NewPool(1, exec, db, clk, testLogger(), noopReporter{}, func(int64) {})
+	pool.SetRetry(func(context.Context, Task, time.Duration) {})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool.Start(ctx)
+
+	// Occupy the single worker so the doomed task stays queued.
+	blocker := createJob(t, db, "blocker", "* * * * *", 0)
+	pool.Enqueue(Task{StoreJob: blocker, Attempt: 1})
+	waitFor(t, func() bool { return exec.size() >= 1 })
+
+	victim := createJob(t, db, "victim", "* * * * *", 0)
+	pool.Enqueue(Task{StoreJob: victim, Attempt: 1})
+	if err := db.DeleteJob(context.Background(), victim.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(exec.blockC)
+	pool.Drain(time.Second)
+	// Only the blocker ever executed.
+	for i := 0; i < 5; i++ {
+		if n := exec.size(); n > 1 {
+			t.Fatalf("deleted job executed %d times", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestRunNowImmediate(t *testing.T) {
 	t.Parallel()
 	exec := &fakeExec{}

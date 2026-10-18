@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,12 @@ import (
 
 	"scheduler/internal/store"
 )
+
+// ErrJobStopped is the cancellation cause used when a job's only
+// execution must be aborted because it was deleted or disabled. It
+// colours the run record as skipped with an explicit note instead of
+// leaving a half-finished failed status.
+var ErrJobStopped = errors.New("job stopped (deleted or disabled)")
 
 // Executor runs one job command. Implementations must honour ctx:
 // cancellation or timeout must stop the underlying process.
@@ -44,6 +51,12 @@ type Pool struct {
 	release func(jobID int64)
 	retry   func(context.Context, Task, time.Duration)
 
+	// cancels holds one cancel cause per currently executing job,
+	// keyed by job id. DeleteJob/disable calls CancelRun so a running
+	// or queued execution of a dead job cannot outlive its row.
+	cancelMu sync.Mutex
+	cancels  map[int64]context.CancelCauseFunc
+
 	wg sync.WaitGroup
 }
 
@@ -61,6 +74,7 @@ func NewPool(size int, exec Executor, db *store.DB, clk eventClock, log *slog.Lo
 		log:     log,
 		rep:     rep,
 		release: release,
+		cancels: make(map[int64]context.CancelCauseFunc),
 	}
 }
 
@@ -153,6 +167,33 @@ func (p *Pool) release2(jobID int64) {
 	}
 }
 
+// CancelRun aborts a job's currently executing run, if any. The
+// ErrJobStopped cause is visible to runOne, so the aborted execution
+// is recorded as skipped with an explicit note instead of failed.
+func (p *Pool) CancelRun(jobID int64) {
+	p.cancelMu.Lock()
+	cancel, ok := p.cancels[jobID]
+	delete(p.cancels, jobID)
+	p.cancelMu.Unlock()
+	if ok {
+		cancel(ErrJobStopped)
+	}
+}
+
+// trackCancel registers a run's cancel hook; cleanup mirrors it.
+func (p *Pool) trackCancel(jobID int64, fn context.CancelCauseFunc) (untrack func()) {
+	p.cancelMu.Lock()
+	p.cancels[jobID] = fn
+	p.cancelMu.Unlock()
+	return func() {
+		// The registry holds one entry per job (claim serialises
+		// executions), so a plain delete cannot clobber a successor.
+		p.cancelMu.Lock()
+		delete(p.cancels, jobID)
+		p.cancelMu.Unlock()
+	}
+}
+
 // runOne executes a task, records the run, and decides retry or
 // dead-lettering.
 func (p *Pool) runOne(ctx context.Context, t Task) {
@@ -166,18 +207,54 @@ func (p *Pool) runOne(ctx context.Context, t Task) {
 		}
 	}()
 
+	// The run record must survive shutdown: the scheduler context is
+	// cancelled while draining, but jobs still finishing in that window
+	// have to write their final status and output to the store.
+	dbCtx := context.WithoutCancel(ctx)
+
+	// Ghost-execution guard: the job row is authoritative at
+	// execution time, not at enqueue time. A queued task or stale
+	// retry chain must not run a command for a job that no longer
+	// exists or was disabled while it waited.
+	cur, err := p.db.GetJob(dbCtx, j.ID)
+	switch {
+	case err != nil:
+		if errors.Is(err, store.ErrNotFound) {
+			p.log.Info("job deleted before execution, dropping task", "job", j.Name)
+		} else {
+			p.log.Error("load job for execution", "job", j.Name, "err", err)
+		}
+		return
+	case !cur.Enabled:
+		// Disabled between claim and execution: record the refusal so
+		// history stays honest, and stop the retry chain here.
+		runID, rerr := p.db.CreateRun(dbCtx, j.ID, p.clk.Now(), t.Attempt)
+		if rerr != nil {
+			p.log.Error("record refused run", "job", j.Name, "err", rerr)
+			return
+		}
+		if ferr := p.db.FinishRun(dbCtx, runID, store.StatusSkipped, p.clk.Now(), nil,
+			"job disabled at execution time"); ferr != nil {
+			p.log.Error("record refused run", "job", j.Name, "err", ferr)
+		}
+		return
+	}
+
 	start := p.clk.Now()
 	timeout := time.Duration(j.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = time.Minute
 	}
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	// The run record must survive shutdown: the scheduler context is
-	// cancelled while draining, but jobs still finishing in that window
-	// have to write their final status and output to the store.
-	dbCtx := context.WithoutCancel(ctx)
+	// runCtx carries both the caller's cancellation/shutdown and the
+	// per-job stop (deletion/disable) as a coloured cause.
+	runCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	untrack := p.trackCancel(j.ID, cancel)
+	defer untrack()
+	// The per-job timeout is layered on top so a stuck process dies on
+	// its own budget while deletion/disable can still abort instantly.
+	timeCtx, cancelTimeout := context.WithTimeout(runCtx, timeout)
+	defer cancelTimeout()
 
 	p.rep.JobStarted(j.Name)
 	runID, err := p.db.CreateRun(dbCtx, j.ID, start, t.Attempt)
@@ -186,7 +263,7 @@ func (p *Pool) runOne(ctx context.Context, t Task) {
 		return
 	}
 
-	out, execErr := p.exec.Execute(runCtx, j.Command, j.Payload)
+	out, execErr := p.exec.Execute(timeCtx, j.Command, j.Payload)
 
 	status := store.StatusSuccess
 	errMsg := ""
@@ -196,7 +273,11 @@ func (p *Pool) runOne(ctx context.Context, t Task) {
 		case ctx.Err() != nil:
 			// Pool shutdown cancelled the worker context.
 			status = store.StatusSkipped
-		case timeoutExceeded(runCtx):
+		case errors.Is(context.Cause(runCtx), ErrJobStopped):
+			// Deletion/disable aborted this run mid-flight.
+			status = store.StatusSkipped
+			errMsg = "job cancelled: deleted or disabled"
+		case timeoutExceeded(timeCtx):
 			status = store.StatusTimeout
 			// Enriched message must exist before FinishRun, or the
 			// timeout note never reaches the stored run.

@@ -9,24 +9,49 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"scheduler/internal/store"
 )
 
-// starter records RunNow calls and fails unknown jobs.
+// starter records RunNow/StopJob calls and fails unknown jobs.
 type starter struct {
+	mu    sync.Mutex
 	calls int64
 	err   error
+	stops []int64
 }
 
 func (st *starter) RunNow(_ context.Context, id int64) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	st.calls = id
 	if id == 404 {
 		return fmt.Errorf("run now: job: %w", store.ErrNotFound)
 	}
 	return st.err
+}
+
+func (st *starter) StopJob(id int64) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.stops = append(st.stops, id)
+}
+
+func (st *starter) count() int64 {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.calls
+}
+
+func (st *starter) stopList() []int64 {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	out := make([]int64, len(st.stops))
+	copy(out, st.stops)
+	return out
 }
 
 func testServer(t *testing.T) (*Server, *store.DB, *starter) {
@@ -359,8 +384,50 @@ func TestRunNowEndpoint(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("run now: %d", rec.Code)
 	}
-	if st.calls != id {
-		t.Fatalf("starter got %d, want %d", st.calls, id)
+	if got, want := st.count(), id; got != want {
+		t.Fatalf("starter got %d, want %d", got, want)
+	}
+}
+
+// TestDeleteStopsExecutions: DELETE must cancel the running run and
+// armed retries (no ghost executions of a dead job's commands). An
+// edit that disables the job must stop in-flight work the same way.
+func TestDeleteStopsExecutions(t *testing.T) {
+	s, db, st := testServer(t)
+	ctx := context.Background()
+	id, err := db.CreateJob(ctx, &store.Job{
+		Name: "ghost", Schedule: "* * * * *", Command: "x", Enabled: true,
+		Timezone: "UTC", TimeoutSeconds: 60,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := do(t, s, "DELETE", fmt.Sprintf("/api/jobs/%d", id), nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	if stops := st.stopList(); len(stops) != 1 || stops[0] != id {
+		t.Fatalf("stops = %v, want [%d]", stops, id)
+	}
+
+	// Disabling runs the same stop path.
+	id2, err := db.CreateJob(ctx, &store.Job{
+		Name: "drowse", Schedule: "* * * * *", Command: "x", Enabled: true,
+		Timezone: "UTC", TimeoutSeconds: 60,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := jobBody("drowse", "* * * * *", false)
+	rec, _ = do(t, s, "PUT", fmt.Sprintf("/api/jobs/%d", id2), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable: %d %s", rec.Code, rec.Body.String())
+	}
+	stops := st.stopList()
+	if len(stops) != 2 || stops[1] != id2 {
+		t.Fatalf("stops = %v, want second %d", stops, id2)
 	}
 }
 

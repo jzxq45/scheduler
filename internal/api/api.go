@@ -25,6 +25,10 @@ import (
 // RunStarter is the subset of the scheduler the API needs.
 type RunStarter interface {
 	RunNow(ctx context.Context, jobID int64) error
+	// StopJob aborts a running execution and armed retries for the
+	// job. DELETE and disabling must call it: nothing should keep
+	// executing shell commands for a job the operator just killed.
+	StopJob(jobID int64)
 }
 
 // Server serves the API and the web UI.
@@ -359,6 +363,10 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.broker.Publish(Event{Type: "job_updated", Job: j.Name, At: time.Now()})
+	// Disabling must not leave a running execution or armed retries.
+	if !j.Enabled && s.sched != nil {
+		s.sched.StopJob(id)
+	}
 	writeJSON(w, http.StatusOK, toDTO(j))
 }
 
@@ -367,15 +375,25 @@ func (s *Server) deleteJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	j, err := s.db.GetJob(r.Context(), id)
+	if err != nil {
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	if err := s.db.DeleteJob(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			httpError(w, http.StatusNotFound, err.Error())
 		} else {
-			httpError(w, http.StatusInternalServerError, err.Error())
+			s.log.Error("delete job", "job", j.Name, "err", err)
+			httpError(w, http.StatusInternalServerError, "delete failed")
 		}
 		return
 	}
-	s.broker.Publish(Event{Type: "job_deleted", Job: strconv.FormatInt(id, 10), At: time.Now()})
+	// No ghost executions: a running run and armed retries stop here.
+	if s.sched != nil {
+		s.sched.StopJob(id)
+	}
+	s.broker.Publish(Event{Type: "job_deleted", Job: j.Name, At: time.Now()})
 	w.WriteHeader(http.StatusNoContent)
 }
 

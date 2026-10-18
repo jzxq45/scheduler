@@ -303,6 +303,17 @@ func (s *Scheduler) release(jobID int64) {
 	s.mu.Unlock()
 }
 
+// StopJob aborts whatever the job still has in flight: a running
+// execution (pooled task mid-Execute) and all armed retries. Deleting
+// or disabling a job must not leave ghost executions behind — the
+// shell command belongs to that job and dies with it. Executions still
+// sitting in the pool queue are refused by the worker's execution-time
+// job check.
+func (s *Scheduler) StopJob(jobID int64) {
+	s.pool.CancelRun(jobID)
+	s.retry.Cancel(jobID)
+}
+
 // shutdown stops accepting work and waits for current tasks.
 func (s *Scheduler) shutdown(ctx context.Context) error {
 	s.log.Info("draining", "timeout", s.opt.DrainTimeout)
