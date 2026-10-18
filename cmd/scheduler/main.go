@@ -107,6 +107,14 @@ func run() error {
 		Addr:              cfg.Listen,
 		Handler:           apiSrv,
 		ReadHeaderTimeout: 5 * time.Second,
+		// Bounded reads: bodies are small JSON (capped at 1 MiB by
+		// MaxBytesReader a few layers up), so 30s is generous.
+		ReadTimeout: 30 * time.Second,
+		// IdleTimeout must stay: keep-alive connections after one
+		// request otherwise linger forever (slowloris on the pool).
+		// No WriteTimeout: /events is a long-lived SSE stream and a
+		// global write deadline would cut every subscriber mid-flight.
+		IdleTimeout: 60 * time.Second,
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
