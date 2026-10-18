@@ -92,23 +92,28 @@ func (p *Pool) worker(ctx context.Context, i int) {
 	}
 }
 
-// Enqueue hands a task to a worker, non-blocking. The stopped check
-// and the send happen under the SAME RLock: Stop takes the Lock before
-// closing the queue, so close() cannot interleave between check and
-// send — the send-on-closed-channel race window is gone.
-func (p *Pool) Enqueue(t Task) {
+// Enqueue hands a task to a worker, non-blocking, and reports whether
+// the task was accepted. The stopped check and the send happen under
+// the SAME RLock: Stop takes the Lock before closing the queue, so
+// close() cannot interleave between check and send — the
+// send-on-closed-channel race window is gone. Refusal (pool draining
+// or queue full) is reported to the caller so it can make the loss
+// visible; the release hook still frees the in-flight guard here.
+func (p *Pool) Enqueue(t Task) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.stopped {
 		// Draining: refuse work.
 		p.release2(t.StoreJob.ID)
-		return
+		return false
 	}
 	select {
 	case p.queue <- t:
+		return true
 	default:
 		p.log.Error("pool queue full, dropping task", "job", t.StoreJob.Name)
 		p.release2(t.StoreJob.ID)
+		return false
 	}
 }
 

@@ -428,6 +428,100 @@ func TestRunNowGuardsInFlight(t *testing.T) {
 	clk.Advance(time.Minute)
 }
 
+// TestRunNowClaimLost: when the stored next_run_at changed after the
+// snapshot (another tick replay, another process), the CAS claim
+// loses, nothing executes and the in-flight guard is freed.
+func TestRunNowClaimLost(t *testing.T) {
+	t.Parallel()
+	exec := &fakeExec{}
+	db, _, cnt, s := setup(t, Options{PoolSize: 1, Log: testLogger()}, exec)
+	_ = cnt
+	j := createJob(t, db, "contested", "0 0 1 1 *", 0)
+	runScheduler(t, s)
+	_ = cnt
+
+	// A stale claim token (next_run_at was moved elsewhere) loses.
+	stale := mkT("2020-01-01T00:00:00Z")
+	s.enqueueClaimed(context.Background(), j, mkT("2024-03-01T10:00:00Z"), nil, &stale)
+	waitFor(t, func() bool { return exec.size() == 0 })
+	cj, err := db.GetJobByName(context.Background(), "contested")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cj.LastRunAt != nil {
+		t.Errorf("lost claim wrote last_run: %v", cj.LastRunAt)
+	}
+
+	// The guard was freed: a correct claim still runs the job.
+	real := mkT("2024-03-01T10:00:00Z")
+	if err := db.SetNextRun(context.Background(), j.ID, real); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := db.GetJob(context.Background(), j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.enqueueClaimed(context.Background(), fresh, real, nil, fresh.NextRunAt)
+	waitFor(t, func() bool { return exec.size() == 1 })
+}
+
+// TestQueueFullRecordsSkipped: every claimed slot is visible in run
+// history. When the pool queue saturates, the dropped slot leaves a
+// skipped run row with a reason instead of vanishing.
+func TestQueueFullRecordsSkipped(t *testing.T) {
+	t.Parallel()
+	block := make(chan struct{})
+	db, clk, _, s := setup(t, Options{PoolSize: 1, Log: testLogger()}, &fakeExec{blockC: block})
+
+	jobs := make([]store.Job, 6)
+	for i := range jobs {
+		jobs[i] = createJob(t, db, fmt.Sprintf("burst%d", i), "0 0 1 1 *", 0)
+	}
+	runScheduler(t, s)
+	clk.Advance(time.Minute) // keep the tick loop alive alongside RunNow
+	// The startup replay (skip policy) rolls every job's next_run_at
+	// forward once; claims racing it would fold into the CAS-lost
+	// path. Wait for it to finish before triggering the runs.
+	waitFor(t, func() bool {
+		for _, jj := range jobs {
+			got, err := db.GetJob(context.Background(), jj.ID)
+			if err != nil || got.NextRunAt == nil {
+				return false
+			}
+		}
+		return true
+	})
+	for _, j := range jobs {
+		if err := s.RunNow(context.Background(), j.ID); err != nil {
+			t.Fatalf("run now %s: %v", j.Name, err)
+		}
+	}
+	// Let the accepted tasks finish so every run row exists.
+	close(block)
+	// Pool capacity: 1 running + 4 queued = 5 accepts; the 6th claim
+	// produces a skipped record instead of a run.
+	waitFor(t, func() bool {
+		runs := mustRuns(t, db, 20)
+		return len(runs) == 6
+	})
+	var skipped int
+	for _, r := range mustRuns(t, db, 20) {
+		switch {
+		case r.Status == store.StatusSkipped:
+			skipped++
+			if r.Error == "" {
+				t.Errorf("skipped run %d lost its reason", r.ID)
+			}
+		case r.Status == store.StatusSuccess:
+		default:
+			t.Errorf("run %d status %s", r.ID, r.Status)
+		}
+	}
+	if skipped != 1 {
+		t.Errorf("skipped runs = %d, want 1", skipped)
+	}
+}
+
 // ---- worker / executor ----
 
 // RunNow refuses disabled jobs: the schedule says no, a manual

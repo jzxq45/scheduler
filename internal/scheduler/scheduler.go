@@ -200,7 +200,8 @@ func (s *Scheduler) catchupMissed(ctx context.Context, now time.Time, j store.Jo
 			s.log.Warn("catchup backlog capped", "job", j.Name, "capped", n)
 			break
 		}
-		s.enqueueClaimed(ctx, j, t, nil)
+		slot := t
+		s.enqueueClaimed(ctx, j, slot, nil, &slot)
 		n++
 	}
 	if err := s.db.SetNextRun(ctx, j.ID, e.NextIn(now, loc)); err != nil {
@@ -225,13 +226,18 @@ func (s *Scheduler) claim(ctx context.Context, now time.Time, j store.Job) {
 		return
 	}
 
-	s.enqueueClaimed(ctx, j, now, nil)
+	s.enqueueClaimed(ctx, j, now, nil, j.NextRunAt)
 }
 
-// enqueueClaimed marks last_run at `at`, computes next_run strictly
-// after `base` (needed for overlapping backoff windows), and starts a
-// task. extraNext, when non-nil, replaces the computed next time.
-func (s *Scheduler) enqueueClaimed(ctx context.Context, j store.Job, at time.Time, base *time.Time) {
+// enqueueClaimed takes the slot with an atomic CAS claim against the
+// snapshot's next_run_at (expectNext), sets last_run to `at`, computes
+// next_run strictly after `base` (needed for overlapping backoff
+// windows), and starts a task. extraNext, when non-nil, replaces the
+// computed next time. expectNext is the claim token: a nil pointer
+// means "the stored next_run_at must be NULL". A lost claim (another
+// tick replay or another process moved next_run_at first) skips the
+// task instead of double-firing.
+func (s *Scheduler) enqueueClaimed(ctx context.Context, j store.Job, at time.Time, base *time.Time, expectNext *time.Time) {
 	e, err := parseSchedule(j.Schedule)
 	if err != nil {
 		s.log.Error("schedule parse", "job", j.Name, "err", err)
@@ -244,13 +250,36 @@ func (s *Scheduler) enqueueClaimed(ctx context.Context, j store.Job, at time.Tim
 		baseT = *base
 	}
 	next := e.NextIn(baseT.Add(time.Second), loc)
-	if err := s.db.SetRunTimes(ctx, j.ID, &at, &next); err != nil {
+	claimed, err := s.db.ClaimJob(ctx, j.ID, expectNext, at, next)
+	if err != nil {
 		s.log.Error("claim job", "job", j.Name, "err", err)
 		s.release(j.ID)
 		return
 	}
+	if !claimed {
+		// Someone else already took this slot (concurrent tick or
+		// second scheduler on the same DB): firing again would run
+		// the command twice.
+		s.log.Warn("claim lost, job already claimed or modified", "job", j.Name)
+		s.release(j.ID)
+		return
+	}
 	s.rep.NextRunSet(j.Name, next.Sub(at))
-	s.pool.Enqueue(Task{StoreJob: j, Attempt: 1})
+	if !s.pool.Enqueue(Task{StoreJob: j, Attempt: 1}) {
+		// The slot is already claimed but will never run; write the
+		// loss into history instead of silently swallowing the tick
+		// (WithoutCancel: the record must survive shutdown).
+		dbCtx := context.WithoutCancel(ctx)
+		runID, err := s.db.CreateRun(dbCtx, j.ID, at, 1)
+		if err != nil {
+			s.log.Error("record dropped slot", "job", j.Name, "err", err)
+			return
+		}
+		if err := s.db.FinishRun(dbCtx, runID, store.StatusSkipped, at, nil,
+			"schedule slot dropped: pool queue full"); err != nil {
+			s.log.Error("record dropped slot", "job", j.Name, "err", err)
+		}
+	}
 }
 
 // rollForward recomputes next_run_at from now; used when the current
@@ -301,7 +330,7 @@ func (s *Scheduler) RunNow(ctx context.Context, jobID int64) error {
 	if busy {
 		return fmt.Errorf("run now: job %q already running", j.Name)
 	}
-	s.enqueueClaimed(ctx, j, s.clk.Now(), nil)
+	s.enqueueClaimed(ctx, j, s.clk.Now(), nil, j.NextRunAt)
 	return nil
 }
 

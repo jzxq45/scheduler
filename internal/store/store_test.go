@@ -314,6 +314,55 @@ func TestMarkRunFinalScoped(t *testing.T) {
 	}
 }
 
+func TestClaimJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTest(t)
+
+	id, err := db.CreateJob(ctx, func() *Job { j := mkJob("claim"); return &j }())
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := time.UnixMilli(1000)
+	next := time.UnixMilli(2000)
+
+	// Expecting a NULL next_run_at wins on the fresh job.
+	ok, err := db.ClaimJob(ctx, id, nil, last, next)
+	if err != nil || !ok {
+		t.Fatalf("first claim: ok=%v err=%v", ok, err)
+	}
+	// Second claim against NULL loses: next_run is set now.
+	ok, err = db.ClaimJob(ctx, id, nil, last, next)
+	if err != nil || ok {
+		t.Fatalf("claim against NULL after claim: ok=%v err=%v", ok, err)
+	}
+	// The same snapshot wins.
+	ok, err = db.ClaimJob(ctx, id, &next, last, next.Add(time.Hour))
+	if err != nil || !ok {
+		t.Fatalf("matching claim: ok=%v err=%v", ok, err)
+	}
+	// A stale snapshot loses and writes nothing.
+	stale := time.UnixMilli(2000)
+	after := next.Add(time.Hour)
+	ok, err = db.ClaimJob(ctx, id, &stale, last, next)
+	if err != nil || ok {
+		t.Fatalf("stale claim: ok=%v err=%v", ok, err)
+	}
+	j, err := db.GetJob(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.NextRunAt == nil || j.NextRunAt.UnixMilli() != after.UnixMilli() ||
+		j.LastRunAt == nil || j.LastRunAt.UnixMilli() != 1000 {
+		t.Errorf("state after lost claim: %+v", j)
+	}
+	// Unknown id loses.
+	ok, err = db.ClaimJob(ctx, 999, nil, last, next)
+	if err != nil || ok {
+		t.Fatalf("unknown id: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestSetRunTimesAndDue(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

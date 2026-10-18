@@ -287,6 +287,34 @@ func (db *DB) DeleteJob(ctx context.Context, id int64) error {
 	return nil
 }
 
+// ClaimJob atomically takes one schedule slot: it sets last_run_at to
+// lastRun and rolls next_run_at to nextRun, but only when the stored
+// next_run_at still equals expectNext. The compare-and-set closes two
+// windows the audit flagged: two replays of the same tick (or a replay
+// racing RunNow) in one process would double-claim, and two scheduler
+// processes sharing one SQLite file would both execute the same job.
+// It returns true when the claim was won; false means someone else
+// moved next_run_at first (an error is reported only on DB failure).
+func (db *DB) ClaimJob(ctx context.Context, id int64, expectNext *time.Time, lastRun, nextRun time.Time) (bool, error) {
+	q, args := `UPDATE jobs SET last_run_at=?, next_run_at=? WHERE id=? AND `,
+		[]any{ms(lastRun), ms(nextRun), id}
+	if expectNext == nil {
+		q += "next_run_at IS NULL"
+	} else {
+		q += "next_run_at=?"
+		args = append(args, ms(*expectNext))
+	}
+	res, err := db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return false, fmt.Errorf("claim job: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("claim job: %w", err)
+	}
+	return n == 1, nil
+}
+
 // SetRunTimes stores last_run_at and next_run_at after scheduling.
 func (db *DB) SetRunTimes(ctx context.Context, id int64, lastRun, nextRun *time.Time) error {
 	_, err := db.ExecContext(ctx,
