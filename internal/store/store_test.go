@@ -57,9 +57,14 @@ func TestJobCRUD(t *testing.T) {
 		t.Errorf("by name: %v %+v", err, byName)
 	}
 
-	list, err := db.ListJobs(ctx)
+	list, err := db.ListJobs(ctx, 0, 0)
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list: %v %d", err, len(list))
+	}
+	// Pagination: offset skips the first row.
+	page2, err := db.ListJobs(ctx, 0, len(list))
+	if err != nil || len(page2) != 0 {
+		t.Fatalf("page 2: %v %d", err, len(page2))
 	}
 
 	// Update

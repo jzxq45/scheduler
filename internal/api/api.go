@@ -235,7 +235,20 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
-	jobs, err := s.db.ListJobs(r.Context())
+	// Pagination: ?limit=&offset=; the default caps one page at 100
+	// jobs so a huge fleet cannot return unbounded payloads.
+	limit, offset := store.DefaultListJobs, 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = min(n, 500)
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	jobs, err := s.db.ListJobs(r.Context(), limit, offset)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return

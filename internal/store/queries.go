@@ -138,11 +138,44 @@ func (db *DB) GetJobByName(ctx context.Context, name string) (Job, error) {
 	return scanJob(row)
 }
 
-// ListJobs returns every job ordered by name.
-func (db *DB) ListJobs(ctx context.Context) ([]Job, error) {
-	rows, err := db.QueryContext(ctx, `SELECT `+jobCols+` FROM jobs ORDER BY name`)
+// DefaultListJobs caps one page of the jobs API; clients page with
+// limit/offset instead of unbounded result sets.
+const DefaultListJobs = 100
+
+// ListJobs returns one page of jobs ordered by name. limit <= 0 or
+// above the cap falls back to the default (100), offset must be >= 0.
+func (db *DB) ListJobs(ctx context.Context, limit, offset int) ([]Job, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := db.QueryContext(ctx,
+		`SELECT `+jobCols+` FROM jobs ORDER BY name LIMIT ? OFFSET ?`,
+		limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// ListAllJobs returns every job: the scheduler's missed-run replay
+// needs the full set, pagination there would silently drop jobs past
+// the first page.
+func (db *DB) ListAllJobs(ctx context.Context) ([]Job, error) {
+	rows, err := db.QueryContext(ctx, `SELECT `+jobCols+` FROM jobs ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list all jobs: %w", err)
 	}
 	defer rows.Close()
 	var out []Job

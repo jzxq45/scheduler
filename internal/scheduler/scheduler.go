@@ -139,7 +139,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 // replayMissed applies the missed-policy to every enabled job once at
 // startup, before the first tick.
 func (s *Scheduler) replayMissed(ctx context.Context) error {
-	jobs, err := s.db.ListJobs(ctx)
+	jobs, err := s.db.ListAllJobs(ctx)
 	if err != nil {
 		return fmt.Errorf("replay: %w", err)
 	}
