@@ -324,6 +324,23 @@ func TestValidation(t *testing.T) {
 
 func boolPtr(b bool) *bool { return &b }
 
+func TestHealthz(t *testing.T) {
+	s, db, _ := testServer(t)
+	rec, _ := do(t, s, "GET", "/healthz", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthz: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "ok") {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+	// A store that cannot answer must fail health.
+	_ = db.Close()
+	rec, _ = do(t, s, "GET", "/healthz", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("closed store healthz: %d", rec.Code)
+	}
+}
+
 func TestRunNowEndpoint(t *testing.T) {
 	s, db, st := testServer(t)
 	id, err := db.CreateJob(context.Background(), &store.Job{

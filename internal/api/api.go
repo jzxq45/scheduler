@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,28 @@ type Server struct {
 	token string
 	// runLimit throttles manual "run now" triggers per client IP.
 	runLimit *rateLimiter
+	// trustProxy, when set, takes the rate-limit key from
+	// X-Forwarded-For instead of the socket address: behind a reverse
+	// proxy every client otherwise shares the single loopback bucket.
+	trustProxy bool
+}
+
+// statusRecorder captures the response code for the access log while
+// forwarding everything else (including Flush for SSE) untouched.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // New builds the server; RunStarter may be nil for API-only setups,
@@ -89,7 +112,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	s.mux.ServeHTTP(w, r)
+	start := time.Now()
+	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	s.mux.ServeHTTP(rec, r)
+	// One line per request: without it a stray 500 is undebuggable.
+	// SSE connections log once, at disconnect, with their full lifetime.
+	s.log.Info("http",
+		"method", r.Method, "path", r.URL.Path, "status", rec.status,
+		"dur", time.Since(start).Round(time.Millisecond), "ip", s.clientIP(r))
+}
+
+// healthz reports process liveness plus a live store check. A pod that
+// lost its database must fail readiness, or probes would keep stale
+// instances in rotation.
+func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
+	if err := s.db.PingContext(r.Context()); err != nil {
+		s.log.Error("healthz", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "down"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // authorize verifies the bearer token, if one is configured, in
@@ -112,6 +154,11 @@ func (s *Server) authorize(r *http.Request) error {
 // Broker exposes the SSE hub so the scheduler Reporter can publish.
 func (s *Server) Broker() *Broker { return s.broker }
 
+// SetTrustedProxy toggles trusting X-Forwarded-For for rate-limit
+// keys. Must be called before serving; false (default) never trusts
+// client-supplied headers.
+func (s *Server) SetTrustedProxy(v bool) { s.trustProxy = v }
+
 // MetricsHandler registers an extra GET route (used for /metrics).
 // Must be called before the server starts serving.
 func (s *Server) MetricsHandler(h http.Handler) {
@@ -122,6 +169,9 @@ func (s *Server) routes() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /{$}", s.ui)
+	// Liveness/readiness for load balancers and container probes:
+	// DB must answer, not just the process.
+	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("POST /api/jobs", s.createJob)
 	mux.HandleFunc("GET /api/jobs", s.listJobs)
 	mux.HandleFunc("GET /api/jobs/{id}", s.getJob)
@@ -379,10 +429,20 @@ func (r *rateLimiter) allow(key string) bool {
 	return true
 }
 
-// clientIP reduces the request to a rate-limit key: remote host
-// without port, falling back to a constant for tests that leave
-// RemoteAddr empty.
-func clientIP(r *http.Request) string {
+// clientIP reduces the request to a rate-limit key. With trustProxy
+// set, the first X-Forwarded-For entry wins (a reverse proxy is in
+// front); without it the socket address is used — XFF is trivially
+// spoofable by direct clients, so it must not be trusted by default.
+func (s *Server) clientIP(r *http.Request) string {
+	if s.trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			ip, _, _ := strings.Cut(xff, ",")
+			ip = strings.TrimSpace(ip)
+			if ip != "" {
+				return ip
+			}
+		}
+	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
 	}
@@ -397,7 +457,7 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !s.runLimit.allow(clientIP(r)) {
+	if !s.runLimit.allow(s.clientIP(r)) {
 		w.Header().Set("Retry-After", "30")
 		httpError(w, http.StatusTooManyRequests, "too many run requests; slow down")
 		return
