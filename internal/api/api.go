@@ -5,11 +5,13 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -57,9 +59,21 @@ func New(db *store.DB, sched RunStarter, log *slog.Logger, b *Broker, apiToken s
 	return s
 }
 
-// ServeHTTP authenticates (when a token is configured) and sets
-// baseline security headers before dispatching.
+// ServeHTTP authenticates (when a token is configured), sets baseline
+// security headers, and recovers panics before dispatching.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// A panic in a handler must cost one 500, not the whole process:
+	// this API runs arbitrary shell commands and is exposed to
+	// operators' scripts; the goroutine crash would be fatal to the
+	// scheduler process itself.
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.log.Error("http handler panic",
+				"method", r.Method, "path", r.URL.Path,
+				"panic", rec, "stack", string(debug.Stack()))
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}()
 	if err := s.authorize(r); err != nil {
 		httpError(w, http.StatusUnauthorized, err.Error())
 		return
@@ -67,16 +81,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// authorize verifies the bearer token, if one is configured.
+// authorize verifies the bearer token, if one is configured, in
+// constant time: a plain == leaks length/prefix timing to a local
+// attacker looping requests.
 func (s *Server) authorize(r *http.Request) error {
 	if s.token == "" {
 		return nil
 	}
-	if r.Header.Get("Authorization") == "Bearer "+s.token {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.token)) == 1 {
 		return nil
 	}
 	// EventSource cannot attach headers; keep the query-param channel.
-	if r.URL.Query().Get("token") == s.token {
+	if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(s.token)) == 1 {
 		return nil
 	}
 	return fmt.Errorf("unauthorized: missing or invalid API token")

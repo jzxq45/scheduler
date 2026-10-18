@@ -143,6 +143,19 @@ func TestUIRenderSmoke(t *testing.T) {
 	}
 }
 
+// A panicking handler must become one 500 response, not a crashed
+// process.
+func TestHTTPRecovery(t *testing.T) {
+	s, _, _ := testServer(t)
+	s.mux.HandleFunc("GET /api/boom", func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	})
+	rec, body := do(t, s, "GET", "/api/boom", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("panic handler: %d %s", rec.Code, body)
+	}
+}
+
 func TestJobCRUD(t *testing.T) {
 	s, db, _ := testServer(t)
 
