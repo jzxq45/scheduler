@@ -206,7 +206,7 @@ func (p *Pool) runOne(ctx context.Context, t Task) {
 	p.rep.JobFinished(j.Name, status, fin.Sub(start))
 
 	if status == store.StatusFailed || status == store.StatusTimeout {
-		p.handleRetries(dbCtx, t, start)
+		p.handleRetries(dbCtx, runID, t, start)
 	}
 }
 
@@ -225,7 +225,7 @@ func msg(base, extra string) string {
 
 // handleRetries enqueues the next attempt after exponential backoff,
 // or marks this run failed_final when attempts are exhausted.
-func (p *Pool) handleRetries(dbCtx context.Context, t Task, start time.Time) {
+func (p *Pool) handleRetries(dbCtx context.Context, runID int64, t Task, start time.Time) {
 	j := t.StoreJob
 	if j.MaxRetries < 0 {
 		j.MaxRetries = 0
@@ -234,7 +234,7 @@ func (p *Pool) handleRetries(dbCtx context.Context, t Task, start time.Time) {
 	// beyond the first.
 	retriesDone := t.Attempt - 1
 	if retriesDone >= j.MaxRetries {
-		if err := p.db.MarkRunsFinal(dbCtx, j.ID); err != nil {
+		if err := p.db.MarkRunFinal(dbCtx, runID); err != nil {
 			p.log.Error("dead letter", "job", j.Name, "err", err)
 		}
 		return

@@ -344,14 +344,21 @@ func (db *DB) RunningRuns(ctx context.Context) ([]int64, error) {
 	return out, rows.Err()
 }
 
-// MarkRunsFinal flips every non-terminal failed run of a job to
-// failed_final: retries are exhausted, this is the dead-letter state.
-func (db *DB) MarkRunsFinal(ctx context.Context, jobID int64) error {
-	_, err := db.ExecContext(ctx,
-		`UPDATE runs SET status=? WHERE job_id=? AND status IN (?,?)`,
-		StatusFailedFinal, jobID, StatusFailed, StatusTimeout)
+// MarkRunFinal flips one run to failed_final: retries for this
+// chain are exhausted, the run is the dead-letter record.
+func (db *DB) MarkRunFinal(ctx context.Context, runID int64) error {
+	res, err := db.ExecContext(ctx,
+		`UPDATE runs SET status=? WHERE id=? AND status IN (?,?)`,
+		StatusFailedFinal, runID, StatusFailed, StatusTimeout)
 	if err != nil {
-		return fmt.Errorf("mark runs final: %w", err)
+		return fmt.Errorf("mark run final: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark run final: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("mark run final: %w", ErrNotFound)
 	}
 	return nil
 }

@@ -91,10 +91,12 @@ func testLogger() *slog.Logger {
 }
 
 // waitFor polls cond every 5ms; wall time bounded even though the
-// fake clock jumps.
+// fake clock jumps. The ceiling is generous (10s): under -race with a
+// dozen parallel tests, goroutines get descheduled for seconds at a
+// time, so tighter deadlines flake on loaded CI machines.
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
@@ -164,12 +166,18 @@ func mustJob(t *testing.T, db *store.DB, name string) store.Job {
 	return j
 }
 
-// waitNext blocks until the job's next_run_at equals want: the
-// scheduler goroutine has then done its startup replay, so fake-time
-// advances cannot race timer creation.
-func waitNext(t *testing.T, db *store.DB, name string, want time.Time) {
+// waitNext blocks until the job's next_run_at equals want AND the
+// scheduler goroutine has registered its tick timer (otherwise a
+// descheduled Run could create the timer after Advance had already
+// moved the clock — the tick would then have a future deadline and
+// never fire, hanging the test).
+func waitNext(t *testing.T, clk *clock.Fake, db *store.DB, name string, want time.Time) {
 	t.Helper()
 	waitFor(t, func() bool {
+		_, hasTimer := clk.Deadline()
+		if !hasTimer {
+			return false
+		}
 		j, err := db.GetJobByName(context.Background(), name)
 		if err != nil {
 			return false
@@ -187,13 +195,10 @@ func TestSchedulerFiresMinuteJob(t *testing.T) {
 
 	runScheduler(t, s)
 
-	waitFor(t, func() bool {
-		j, err := db.GetJobByName(context.Background(), "every-minute")
-		return err == nil && j.NextRunAt != nil
-	})
+	waitNext(t, clk, db, "every-minute", mkT("2024-03-01T10:01:00Z"))
 	j := mustJob(t, db, "every-minute")
-	if want := mkT("2024-03-01T10:01:00Z"); j.NextRunAt.UnixMilli() != want.UnixMilli() {
-		t.Errorf("next run = %v, want %v", j.NextRunAt, want)
+	if j.NextRunAt.UnixMilli() != mkT("2024-03-01T10:01:00Z").UnixMilli() {
+		t.Errorf("next run = %v", j.NextRunAt)
 	}
 
 	// Three minute-boundaries pass: three fires (step by step — one
@@ -285,17 +290,40 @@ func TestRetryBackoffAndDeadLetter(t *testing.T) {
 	createJob(t, db, "flaky", "* * * * *", 2) // 2 retries → 3 attempts total
 
 	runScheduler(t, s)
-	waitNext(t, db, "flaky", mkT("2024-03-01T10:01:00Z"))
+	waitNext(t, clk, db, "flaky", mkT("2024-03-01T10:01:00Z"))
 	clk.Advance(time.Minute)
 	waitFor(t, func() bool { return exec.size() >= 1 && cnt.retried() >= 1 })
 	clk.Advance(2 * time.Second)
 	waitFor(t, func() bool { return len(mustRuns(t, db, 10)) == 2 && cnt.retried() >= 2 })
 	clk.Advance(3 * time.Second)
-	waitFor(t, func() bool { return len(mustRuns(t, db, 10)) == 3 })
+	// Single read per poll: the attempt-3 row may be observed between
+	// FinishRun (failed) and MarkRunFinal (failed_final); two separate
+	// reads inside one poll would hide that window.
+	waitFor(t, func() bool {
+		runs := mustRuns(t, db, 10)
+		if len(runs) != 3 {
+			return false
+		}
+		for _, r := range runs {
+			if r.Attempt == 3 && r.Status != store.StatusFailedFinal {
+				return false
+			}
+		}
+		return true
+	})
 	runs := mustRuns(t, db, 10)
+	// Only the last attempt of the retry chain is dead-lettered;
+	// intermediate attempts keep their plain failed status.
 	for _, r := range runs {
-		if r.Status != store.StatusFailedFinal {
-			t.Errorf("run=%d status %s, want failed_final", r.ID, r.Status)
+		switch {
+		case r.Attempt == 3:
+			if r.Status != store.StatusFailedFinal {
+				t.Errorf("run=%d attempt=3 status %s, want failed_final", r.ID, r.Status)
+			}
+		default:
+			if r.Status != store.StatusFailed {
+				t.Errorf("run=%d attempt=%d status %s, want failed", r.ID, r.Attempt, r.Status)
+			}
 		}
 		if r.Error == "" {
 			t.Errorf("run=%d missing error", r.ID)
@@ -313,7 +341,7 @@ func TestRetrySucceedsMidWay(t *testing.T) {
 	createJob(t, db, "halfway", "* * * * *", 5)
 
 	runScheduler(t, s)
-	waitNext(t, db, "halfway", mkT("2024-03-01T10:01:00Z"))
+	waitNext(t, clk, db, "halfway", mkT("2024-03-01T10:01:00Z"))
 	clk.Advance(time.Minute)
 	waitFor(t, func() bool { return exec.size() >= 1 && cnt.retried() >= 1 })
 	clk.Advance(2 * time.Second)
@@ -344,7 +372,7 @@ func TestSchedulerDrain(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.Run(ctx) }()
 
-	waitNext(t, db, "minute", mkT("2024-03-01T10:01:00Z"))
+	waitNext(t, clk, db, "minute", mkT("2024-03-01T10:01:00Z"))
 	clk.Advance(time.Minute)
 	waitFor(t, func() bool { return exec.size() >= 1 })
 

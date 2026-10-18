@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -239,6 +240,54 @@ func TestRunsCRUDAndRetention(t *testing.T) {
 	remaining, _ := db.ListRuns(ctx, 10)
 	if len(remaining) != 1 || remaining[0].ID != run2 {
 		t.Errorf("remaining = %+v", remaining)
+	}
+}
+
+// MarkRunFinal dead-letters exactly one run; sibling failed runs of
+// the same job stay untouched.
+func TestMarkRunFinalScoped(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTest(t)
+	id, err := db.CreateJob(ctx, func() *Job { j := mkJob("dl"); return &j }())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1, err := db.CreateRun(ctx, id, time.Now(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := db.CreateRun(ctx, id, time.Now(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishRun(ctx, r1, StatusFailed, time.Now(), nil, "boom"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishRun(ctx, r2, StatusFailed, time.Now(), nil, "boom"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkRunFinal(ctx, r2); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	g1, err := db.GetRun(ctx, r1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g2, err := db.GetRun(ctx, r2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g1.Status != StatusFailed {
+		t.Errorf("sibling run overwritten: %+v", g1)
+	}
+	if g2.Status != StatusFailedFinal {
+		t.Errorf("target run not finalized: %+v", g2)
+	}
+
+	// A second call reports not-found: the row is already final.
+	if err := db.MarkRunFinal(ctx, r2); !errors.Is(err, ErrNotFound) {
+		t.Errorf("re-mark must report not found, got %v", err)
 	}
 }
 
