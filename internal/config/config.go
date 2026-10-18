@@ -30,6 +30,10 @@ type Config struct {
 	// "Authorization: Bearer <token>" (a "token" query parameter is
 	// also accepted for EventSource clients). Empty disables auth.
 	APIToken string
+	// TrustProxy, when set, makes the rate limiter key clients by
+	// X-Forwarded-For (set this only when a reverse proxy is in front
+	// of the scheduler and overwrites the header).
+	TrustProxy bool
 }
 
 // LogValue is the slog representation of the config: it publishes
@@ -114,6 +118,8 @@ func applyYAML(cfg *Config, raw []byte) error {
 			cfg.MissedPolicy = val
 		case "api_token":
 			cfg.APIToken = val
+		case "trust_proxy":
+			cfg.TrustProxy, setErr = strconv.ParseBool(val)
 		default:
 			return fmt.Errorf("line %d: unknown key %q", i+1, key)
 		}
@@ -172,6 +178,8 @@ func applyEnv(cfg *Config, env []string) error {
 			cfg.MissedPolicy = v
 		case "api_token":
 			cfg.APIToken = v
+		case "trust_proxy":
+			cfg.TrustProxy, setErr = strconv.ParseBool(v)
 		}
 		if setErr != nil {
 			return fmt.Errorf("%s: %w", k, setErr)
