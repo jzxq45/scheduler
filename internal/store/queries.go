@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // ErrNotFound is returned by getters when no row matches.
@@ -67,36 +70,16 @@ const jobCols = `id, name, schedule, command, payload, enabled, timezone,
 
 const runCols = `id, job_id, started_at, finished_at, status, output, error, attempt`
 
-// containsIgnoreCase matches SQLite error text; SQLite messages vary
-// slightly between versions, so exact unwrapping is unreliable for
-// foreign errors.
-func containsIgnoreCase(h, n string) bool {
-	// SQLite error strings vary slightly between versions.
-	for i := 0; i+len(n) <= len(h); i++ {
-		if eqFold(h[i:i+len(n)], n) {
-			return true
-		}
-	}
-	return false
-}
-
-func eqFold(a, b string) bool {
-	if len(a) != len(b) {
+// isUniqueViolation reports whether err is a driver-reported UNIQUE
+// constraint failure. Matching the driver's typed error and result
+// code, not the message text, survives wording changes across driver
+// versions — string sniffing would silently break duplicate detection.
+func isUniqueViolation(err error) bool {
+	var serr *sqlite.Error
+	if !errors.As(err, &serr) {
 		return false
 	}
-	for i := 0; i < len(a); i++ {
-		if lower(a[i]) != lower(b[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func lower(c byte) byte {
-	if c >= 'A' && c <= 'Z' {
-		return c + 32
-	}
-	return c
+	return serr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
 }
 
 // CreateJob inserts j and returns the new id. Duplicate names fail.
@@ -114,7 +97,7 @@ func (db *DB) CreateJob(ctx context.Context, j *Job) (int64, error) {
 		j.Name, j.Schedule, j.Command, j.Payload, en, j.Timezone,
 		j.TimeoutSeconds, j.MaxRetries, ms(now), ms(now), ptrMS(j.LastRunAt), ptrMS(j.NextRunAt))
 	if err != nil {
-		if containsIgnoreCase(err.Error(), "UNIQUE constraint failed") {
+		if isUniqueViolation(err) {
 			return 0, fmt.Errorf("create job: %w", ErrDuplicate)
 		}
 		return 0, fmt.Errorf("create job: %w", err)
@@ -256,7 +239,7 @@ func (db *DB) UpdateJob(ctx context.Context, j *Job) error {
 		j.Name, j.Schedule, j.Command, j.Payload, en, j.Timezone,
 		j.TimeoutSeconds, j.MaxRetries, ms(j.UpdatedAt), ptrMS(j.NextRunAt), j.ID)
 	if err != nil {
-		if containsIgnoreCase(err.Error(), "UNIQUE constraint failed") {
+		if isUniqueViolation(err) {
 			return fmt.Errorf("update job: %w", ErrDuplicate)
 		}
 		return fmt.Errorf("update job: %w", err)
