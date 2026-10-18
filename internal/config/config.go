@@ -193,5 +193,11 @@ func (c Config) validate() error {
 	case c.MissedPolicy != PolicySkip && c.MissedPolicy != PolicyCatchup && c.MissedPolicy != PolicyLatest:
 		return fmt.Errorf("missed_policy must be skip|catchup|latest, got %q", c.MissedPolicy)
 	}
+	// Reject unknown levels before they crash the logger at startup.
+	switch c.LogLevel {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("log_level must be debug|warn|info|error, got %q", c.LogLevel)
+	}
 	return nil
 }

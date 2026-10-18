@@ -115,6 +115,10 @@ func TestValidate(t *testing.T) {
 		{"bad pool", func(c *Config) { c.WorkerPoolSize = 0 }, false},
 		{"bad retention", func(c *Config) { c.RetentionDays = 0 }, false},
 		{"bad listen", func(c *Config) { c.Listen = "" }, false},
+		{"bad log level", func(c *Config) { c.LogLevel = "verbose" }, false},
+		{"empty log level", func(c *Config) { c.LogLevel = "" }, false},
+		{"log level warn ok", func(c *Config) { c.LogLevel = "warn" }, true},
+		{"log level error ok", func(c *Config) { c.LogLevel = "error" }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
