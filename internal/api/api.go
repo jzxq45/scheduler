@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"sync"
 	"time"
 
 	"scheduler/internal/cronexpr"
@@ -35,6 +37,8 @@ type Server struct {
 	// "Authorization: Bearer <token>" (or "?token=" for EventSource,
 	// which cannot set custom headers).
 	token string
+	// runLimit throttles manual "run now" triggers per client IP.
+	runLimit *rateLimiter
 }
 
 // New builds the server; RunStarter may be nil for API-only setups,
@@ -46,11 +50,12 @@ func New(db *store.DB, sched RunStarter, log *slog.Logger, b *Broker, apiToken s
 		b = NewBroker()
 	}
 	s := &Server{
-		db:     db,
-		sched:  sched,
-		log:    log,
-		broker: b,
-		token:  apiToken,
+		db:       db,
+		sched:    sched,
+		log:      log,
+		broker:   b,
+		token:    apiToken,
+		runLimit: newRateLimiter(defaultRunRatePerMin, time.Minute),
 	}
 	if log == nil {
 		s.log = slog.Default()
@@ -299,9 +304,77 @@ func (s *Server) deleteJob(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// defaultRunRatePerMin caps manual triggers per client IP per minute:
+// "run now" bypasses the schedule and lands on the worker pool; an
+// unbounded endpoint lets one noisy consumer starve everyone else.
+const defaultRunRatePerMin = 5
+
+// rateLimiter is a minimal in-memory sliding-window limiter. It is
+// deliberately per-process state: a restart resets counts, which is
+// acceptable for throttling abuse, not for quota accounting.
+type rateLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	window time.Duration
+	hits   map[string][]time.Time
+	lastGC time.Time
+}
+
+func newRateLimiter(limit int, window time.Duration) *rateLimiter {
+	return &rateLimiter{limit: limit, window: window, hits: map[string][]time.Time{}, lastGC: time.Now()}
+}
+
+// allow reports whether key gets a slot in the current window.
+func (r *rateLimiter) allow(key string) bool {
+	now := time.Now()
+	cut := now.Add(-r.window)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Prune long-idle keys opportunistically so the map cannot grow
+	// with unique attacker addresses forever.
+	if now.Sub(r.lastGC) >= r.window {
+		for k, hh := range r.hits {
+			if len(hh) == 0 || hh[len(hh)-1].Before(cut) {
+				delete(r.hits, k)
+			}
+		}
+		r.lastGC = now
+	}
+	kept := r.hits[key][:0]
+	for _, h := range r.hits[key] {
+		if h.After(cut) {
+			kept = append(kept, h)
+		}
+	}
+	if len(kept) >= r.limit {
+		r.hits[key] = kept
+		return false
+	}
+	r.hits[key] = append(kept, now)
+	return true
+}
+
+// clientIP reduces the request to a rate-limit key: remote host
+// without port, falling back to a constant for tests that leave
+// RemoteAddr empty.
+func clientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	if r.RemoteAddr == "" {
+		return "local"
+	}
+	return r.RemoteAddr
+}
+
 func (s *Server) runJob(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if !s.runLimit.allow(clientIP(r)) {
+		w.Header().Set("Retry-After", "30")
+		httpError(w, http.StatusTooManyRequests, "too many run requests; slow down")
 		return
 	}
 	if s.sched == nil {

@@ -156,6 +156,41 @@ func TestHTTPRecovery(t *testing.T) {
 	}
 }
 
+// The /run endpoint is throttled per client IP: 5 manual triggers per
+// minute, then 429 with Retry-After.
+func TestRunRateLimited(t *testing.T) {
+	s, _, _ := testServer(t)
+	rec, body := do(t, s, "POST", "/api/jobs", jobBody("rl", "* * * * *", true))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, body)
+	}
+	var d JobDTO
+	if err := json.Unmarshal(body, &d); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < defaultRunRatePerMin; i++ {
+		rec, _ := do(t, s, "POST", fmt.Sprintf("/api/jobs/%d/run", d.ID), nil)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("run %d: %d", i+1, rec.Code)
+		}
+	}
+	rec, _ = do(t, s, "POST", fmt.Sprintf("/api/jobs/%d/run", d.ID), nil)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-limit run: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Errorf("missing Retry-After on 429")
+	}
+	// The limit is per IP: another address still gets through.
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/jobs/%d/run", d.ID), nil)
+	req.RemoteAddr = "10.9.8.7:4321"
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("other IP: %d", rec.Code)
+	}
+}
+
 func TestJobCRUD(t *testing.T) {
 	s, db, _ := testServer(t)
 
