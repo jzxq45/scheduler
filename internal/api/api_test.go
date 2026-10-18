@@ -191,6 +191,21 @@ func TestRunRateLimited(t *testing.T) {
 	}
 }
 
+// Security headers must be present on every response.
+func TestSecurityHeaders(t *testing.T) {
+	s, _, _ := testServer(t)
+	rec, _ := do(t, s, "GET", "/api/jobs", nil)
+	for hdr, want := range map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "strict-origin-when-cross-origin",
+	} {
+		if got := rec.Header().Get(hdr); got != want {
+			t.Errorf("%s = %q, want %q", hdr, got, want)
+		}
+	}
+}
+
 func TestJobCRUD(t *testing.T) {
 	s, db, _ := testServer(t)
 

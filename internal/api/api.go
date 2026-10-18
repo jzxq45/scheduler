@@ -67,6 +67,12 @@ func New(db *store.DB, sched RunStarter, log *slog.Logger, b *Broker, apiToken s
 // ServeHTTP authenticates (when a token is configured), sets baseline
 // security headers, and recovers panics before dispatching.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Baseline hardening for every response, UI and API alike: no
+	// MIME sniffing, no framing, no referrer leakage.
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 	// A panic in a handler must cost one 500, not the whole process:
 	// this API runs arbitrary shell commands and is exposed to
 	// operators' scripts; the goroutine crash would be fatal to the
