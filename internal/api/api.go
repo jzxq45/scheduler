@@ -234,12 +234,28 @@ type RunDTO struct {
 	Attempt    int    `json:"attempt"`
 }
 
+// maxListOutput caps the output included in run listings. A run row
+// can hold up to 64 KiB; a page of 500 untruncated outputs answers
+// with 32 MB per request and holds the single SQLite connection while
+// serialising it — starving the tick loop. Full output still lives in
+// the database; the listing only shows the head with a truncation
+// marker.
+const maxListOutput = 4096
+
+func truncateOutput(b []byte) string {
+	if len(b) <= maxListOutput {
+		return string(b)
+	}
+	return fmt.Sprintf("%s… (%d bytes total, truncated)",
+		string(b[:maxListOutput]), len(b))
+}
+
 func runDTO(r store.Run) RunDTO {
 	d := RunDTO{
 		ID: r.ID, JobID: r.JobID, Status: r.Status,
 		StartedAt: r.StartedAt.UTC().Format(time.RFC3339),
 		Error:     r.Error, Attempt: r.Attempt,
-		Output: string(r.Output),
+		Output: truncateOutput(r.Output),
 	}
 	if r.FinishedAt != nil {
 		d.FinishedAt = r.FinishedAt.UTC().Format(time.RFC3339)

@@ -463,6 +463,41 @@ func TestRunHistory(t *testing.T) {
 	if len(runs) != 3 || runs[0].Status != store.StatusSuccess || runs[0].Output != "hi" {
 		t.Fatalf("runs = %+v", runs)
 	}
+
+	// A huge output is truncated in listings: a 500-run page of
+	// full-size outputs would answer with tens of megabytes and hold
+	// the single DB connection while serialising.
+	big := make([]byte, 64*1024)
+	for i := range big {
+		big[i] = 'x'
+	}
+	bid, err := db.CreateRun(ctx, id, now, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishRun(ctx, bid, store.StatusSuccess, now, big, ""); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ = do(t, s, "GET", fmt.Sprintf("/api/jobs/%d/runs?limit=5", id), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("runs: %d", rec.Code)
+	}
+	var trimmed []RunDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &trimmed); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range trimmed {
+		if r.ID == bid {
+			if len(r.Output) > 4600 {
+				t.Errorf("listing output length = %d, want truncated", len(r.Output))
+			}
+			if !strings.Contains(r.Output, "truncated") {
+				t.Errorf("truncated output missing marker: %.50s", r.Output)
+			}
+		} else if len(r.Output) > 4096 {
+			t.Errorf("small output wrongly truncated: %d", len(r.Output))
+		}
+	}
 }
 
 // TestSSESubscriberCap: the broker refuses subscribers past its cap
