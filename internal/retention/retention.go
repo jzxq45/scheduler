@@ -42,7 +42,7 @@ func New(db *store.DB, clk clock.Clock, days int, log *slog.Logger) *Cleaner {
 // Run sweeps until ctx is done; the first sweep happens immediately
 // at startup, the rest on the interval timer.
 func (c *Cleaner) Run(ctx context.Context) error {
-	c.Sweep()
+	c.Sweep(ctx)
 	tick := c.clk.NewTimer(c.interval)
 	defer func() { tick.Stop() }()
 	for {
@@ -50,7 +50,7 @@ func (c *Cleaner) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-tick.C:
-			c.Sweep()
+			c.Sweep(ctx)
 			old := tick
 			tick = c.clk.NewTimer(c.interval)
 			old.Stop()
@@ -58,10 +58,17 @@ func (c *Cleaner) Run(ctx context.Context) error {
 	}
 }
 
-// Sweep deletes runs older than the retention window once.
-func (c *Cleaner) Sweep() {
+// Sweep deletes runs older than the retention window once. ctx comes
+// from the caller: with the scheduler shutting down the pending
+// delete is abandoned instead of writing with a Background context.
+// A nil ctx falls back to Background so direct callers (tests, admin
+// endpoints) do not have to plumb one through.
+func (c *Cleaner) Sweep(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	cutoff := c.clk.Now().Add(-c.older)
-	n, err := c.db.DeleteRunsBefore(context.Background(), cutoff)
+	n, err := c.db.DeleteRunsBefore(ctx, cutoff)
 	if err != nil {
 		c.log.Error("retention sweep", "err", err)
 		return

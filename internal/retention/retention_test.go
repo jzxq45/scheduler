@@ -48,7 +48,7 @@ func TestCleanerDeletesOldRuns(t *testing.T) {
 	}
 
 	c := New(db, clk, 30, logger())
-	c.Sweep()
+	c.Sweep(context.Background())
 
 	if _, err := db.GetRun(ctx, old); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("old run should be deleted, err=%v", err)
