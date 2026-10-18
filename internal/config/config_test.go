@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +28,24 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 	if cfg != defaults() {
 		t.Errorf("got %+v, want %+v", cfg, defaults())
+	}
+}
+
+// The slog representation must never carry the token itself, only the
+// boolean flag: stdout and log shippers are read by more people than
+// the config file. Verified through a real logger call, which is
+// exactly the production path ("logger.Info(\"starting\", \"config\", cfg)").
+func TestConfigLogValueHidesToken(t *testing.T) {
+	t.Parallel()
+	c := Config{Listen: "127.0.0.1:8081", DBPath: "s.db", LogLevel: "info", APIToken: "s3cret-token"}
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("starting", "config", c)
+	out := buf.String()
+	if strings.Contains(out, "s3cret-token") {
+		t.Errorf("token leaked into log output: %s", out)
+	}
+	if !strings.Contains(out, "api_token_set=true") {
+		t.Errorf("api_token_set flag missing: %s", out)
 	}
 }
 

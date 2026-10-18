@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -29,6 +30,22 @@ type Config struct {
 	// "Authorization: Bearer <token>" (a "token" query parameter is
 	// also accepted for EventSource clients). Empty disables auth.
 	APIToken string
+}
+
+// LogValue is the slog representation of the config: it publishes
+// every field except the token, which appears only as a boolean
+// "api_token_set" flag. Logging the raw struct would push the secret
+// into stdout and any log shipper downstream.
+func (c Config) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("listen", c.Listen),
+		slog.String("db_path", c.DBPath),
+		slog.Int("worker_pool_size", c.WorkerPoolSize),
+		slog.Int("retention_days", c.RetentionDays),
+		slog.String("log_level", c.LogLevel),
+		slog.String("missed_policy", c.MissedPolicy),
+		slog.Bool("api_token_set", c.APIToken != ""),
+	)
 }
 
 func defaults() Config {
