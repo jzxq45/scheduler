@@ -198,19 +198,29 @@ func (p *Pool) trackCancel(jobID int64, fn context.CancelCauseFunc) (untrack fun
 // dead-lettering.
 func (p *Pool) runOne(ctx context.Context, t Task) {
 	j := t.StoreJob
+	// The run record must survive shutdown: the scheduler context is
+	// cancelled while draining, but jobs still finishing in that window
+	// have to write their final status and output to the store.
+	dbCtx := context.WithoutCancel(ctx)
+	// The run id lives at function scope so the panic handler can
+	// close it: a panic after CreateRun must still finish the run
+	// (failed), otherwise the row stays "running" until a restart.
+	var runID int64
 	defer func() {
 		if r := recover(); r != nil {
 			p.log.Error("task panic", "job", j.Name, "panic", r)
+			if runID != 0 {
+				if err := p.db.FinishRun(dbCtx, runID, store.StatusFailed, p.clk.Now(), nil,
+					fmt.Sprintf("worker panic: %v", r)); err != nil {
+					p.log.Error("finish panicked run", "job", j.Name, "err", err)
+				}
+				p.rep.JobFinished(j.Name, store.StatusFailed, 0)
+			}
 		}
 		if p.release != nil {
 			p.release(j.ID)
 		}
 	}()
-
-	// The run record must survive shutdown: the scheduler context is
-	// cancelled while draining, but jobs still finishing in that window
-	// have to write their final status and output to the store.
-	dbCtx := context.WithoutCancel(ctx)
 
 	// Ghost-execution guard: the job row is authoritative at
 	// execution time, not at enqueue time. A queued task or stale
@@ -228,12 +238,12 @@ func (p *Pool) runOne(ctx context.Context, t Task) {
 	case !cur.Enabled:
 		// Disabled between claim and execution: record the refusal so
 		// history stays honest, and stop the retry chain here.
-		runID, rerr := p.db.CreateRun(dbCtx, j.ID, p.clk.Now(), t.Attempt)
+		refused, rerr := p.db.CreateRun(dbCtx, j.ID, p.clk.Now(), t.Attempt)
 		if rerr != nil {
 			p.log.Error("record refused run", "job", j.Name, "err", rerr)
 			return
 		}
-		if ferr := p.db.FinishRun(dbCtx, runID, store.StatusSkipped, p.clk.Now(), nil,
+		if ferr := p.db.FinishRun(dbCtx, refused, store.StatusSkipped, p.clk.Now(), nil,
 			"job disabled at execution time"); ferr != nil {
 			p.log.Error("record refused run", "job", j.Name, "err", ferr)
 		}
@@ -257,7 +267,7 @@ func (p *Pool) runOne(ctx context.Context, t Task) {
 	defer cancelTimeout()
 
 	p.rep.JobStarted(j.Name)
-	runID, err := p.db.CreateRun(dbCtx, j.ID, start, t.Attempt)
+	runID, err = p.db.CreateRun(dbCtx, j.ID, start, t.Attempt)
 	if err != nil {
 		p.log.Error("create run", "job", j.Name, "err", err)
 		return

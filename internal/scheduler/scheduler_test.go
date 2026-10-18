@@ -52,6 +52,14 @@ func (f *fakeExec) size() int {
 	return len(f.calls)
 }
 
+// panicExec always panics: the worker's recover must close the run
+// row with a failed status instead of leaving it running.
+type panicExec struct{}
+
+func (panicExec) Execute(context.Context, string, string) ([]byte, error) {
+	panic("boom in executor")
+}
+
 func openDB(t *testing.T) *store.DB {
 	t.Helper()
 	db, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
@@ -88,6 +96,12 @@ func (c *countRep) NextRunSet(string, time.Duration) { c.mu.Lock(); c.next++; c.
 
 func (c *countRep) retried() int { c.mu.Lock(); defer c.mu.Unlock(); return c.retries }
 
+func (c *countRep) finishedCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.finished
+}
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
@@ -108,7 +122,7 @@ func waitFor(t *testing.T, cond func() bool) {
 	t.Fatal("condition not met in time")
 }
 
-func setup(t *testing.T, opt Options, exec *fakeExec) (*store.DB, *clock.Fake, *countRep, *Scheduler) {
+func setup(t *testing.T, opt Options, exec Executor) (*store.DB, *clock.Fake, *countRep, *Scheduler) {
 	t.Helper()
 	db := openDB(t)
 	clk := clock.NewFake(mkT("2024-03-01T10:00:00Z"))
@@ -479,6 +493,31 @@ func TestRunDropsDeletedJob(t *testing.T) {
 			t.Fatalf("deleted job executed %d times", n)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestRunPanicFinalizesRun: a panic inside the executor must leave a
+// finished failed run, not a row stuck in "running" until restart.
+func TestRunPanicFinalizesRun(t *testing.T) {
+	t.Parallel()
+	db, clk, cnt, s := setup(t, Options{PoolSize: 1, Log: testLogger()}, panicExec{})
+	j := createJob(t, db, "blaster", "* * * * *", 0)
+	_ = j
+	runScheduler(t, s)
+	waitNext(t, clk, db, "blaster", mkT("2024-03-01T10:01:00Z"))
+	clk.Advance(time.Minute)
+	waitFor(t, func() bool {
+		runs := mustRuns(t, db, 10)
+		for _, r := range runs {
+			if r.Status == store.StatusFailed && strings.Contains(r.Error, "worker panic") &&
+				r.FinishedAt != nil {
+				return true
+			}
+		}
+		return false
+	})
+	if c := cnt.finishedCount(); c == 0 {
+		t.Error("reporter never saw the finished event")
 	}
 }
 
