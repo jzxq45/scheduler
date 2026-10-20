@@ -470,7 +470,6 @@ func TestRunDropsDeletedJob(t *testing.T) {
 	db := openDB(t)
 	clk := clock.NewFake(mkT("2024-03-01T10:00:00Z"))
 	pool := NewPool(1, exec, db, clk, testLogger(), noopReporter{}, func(int64) {})
-	pool.SetRetry(func(context.Context, Task, time.Duration) {})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	pool.Start(ctx)
@@ -676,7 +675,6 @@ func TestWorkerExecutesTask(t *testing.T) {
 	db := openDB(t)
 	clk := clock.NewFake(mkT("2024-03-01T10:00:00Z"))
 	pool := NewPool(1, exec, db, clk, testLogger(), noopReporter{}, func(int64) {})
-	pool.SetRetry(func(context.Context, Task, time.Duration) {})
 	pool.Start(context.Background())
 
 	j := createJob(t, db, "w", "* * * * *", 0)
@@ -698,7 +696,6 @@ func TestWorkerPoolConcurrency(t *testing.T) {
 	db := openDB(t)
 	clk := clock.NewFake(mkT("2024-03-01T10:00:00Z"))
 	pool := NewPool(4, exec, db, clk, testLogger(), noopReporter{}, func(int64) {})
-	pool.SetRetry(func(context.Context, Task, time.Duration) {})
 	pool.Start(context.Background())
 
 	for i := 0; i < 4; i++ {
@@ -720,7 +717,6 @@ func TestEnqueueAfterDrain(t *testing.T) {
 	pool := NewPool(1, exec, db, clk, testLogger(), noopReporter{}, func(id int64) {
 		released <- id
 	})
-	pool.SetRetry(func(context.Context, Task, time.Duration) {})
 	pool.Start(context.Background())
 	j := createJob(t, db, "late", "* * * * *", 0)
 
@@ -754,7 +750,6 @@ func TestStopEnqueueRace(t *testing.T) {
 	db := openDB(t)
 	clk := clock.NewFake(mkT("2024-03-01T10:00:00Z"))
 	pool := NewPool(2, exec, db, clk, testLogger(), noopReporter{}, func(int64) {})
-	pool.SetRetry(func(context.Context, Task, time.Duration) {})
 	ctx, cancel := context.WithCancel(context.Background())
 	pool.Start(ctx)
 

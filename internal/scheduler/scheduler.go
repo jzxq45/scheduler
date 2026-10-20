@@ -111,11 +111,9 @@ func New(db *store.DB, clk clock.Clock, exec Executor, opt Options, rep Reporter
 		inflight: make(map[int64]bool),
 	}
 	s.pool = NewPool(opt.PoolSize, exec, db, clk, opt.Log, rep, s.release)
-	s.retry = NewRetryQueue(clk, func(_ context.Context, t Task) { s.pool.Enqueue(t) },
-		func(t Task, attempt int) {
-			rep.RetryScheduled(t.StoreJob.Name, attempt)
-		})
-	s.pool.SetRetry(s.retry.Arm)
+	// The pool builds its own retry queue; StopJob cancels its armed
+	// timers through this reference.
+	s.retry = s.pool.RetryQueue()
 	return s
 }
 

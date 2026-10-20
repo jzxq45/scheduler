@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"scheduler/internal/clock"
 	"scheduler/internal/store"
 )
 
@@ -45,11 +46,13 @@ type Pool struct {
 
 	exec    Executor
 	db      *store.DB
-	clk     eventClock
+	clk     clock.Clock
 	log     *slog.Logger
 	rep     Reporter
 	release func(jobID int64)
-	retry   func(context.Context, Task, time.Duration)
+	// retry is built inside NewPool (see the comment there); there is
+	// no nil state and no post-construction wiring to forget.
+	retry *RetryQueue
 
 	// cancels holds one cancel cause per currently executing job,
 	// keyed by job id. DeleteJob/disable calls CancelRun so a running
@@ -60,12 +63,17 @@ type Pool struct {
 	wg sync.WaitGroup
 }
 
-// NewPool wires a pool; Drain closes the queue.
-func NewPool(size int, exec Executor, db *store.DB, clk eventClock, log *slog.Logger, rep Reporter, release func(int64)) *Pool {
+// NewPool wires a pool; Drain closes the queue. The retry queue is
+// constructed here with a deliver closure over the pool itself: the
+// pool existed by the time any retry can be armed (a retry only ever
+// comes out of runOne), so the wiring has no nil window and no
+// forgot-to-call-SetRetry failure mode — retries cannot be silently
+// dropped any more.
+func NewPool(size int, exec Executor, db *store.DB, clk clock.Clock, log *slog.Logger, rep Reporter, release func(int64)) *Pool {
 	if size < 1 {
 		size = 1
 	}
-	return &Pool{
+	p := &Pool{
 		// Buffer absorbs bursts so the tick loop never blocks.
 		queue:   make(chan Task, 4*size),
 		exec:    exec,
@@ -76,10 +84,20 @@ func NewPool(size int, exec Executor, db *store.DB, clk eventClock, log *slog.Lo
 		release: release,
 		cancels: make(map[int64]context.CancelCauseFunc),
 	}
+	p.retry = NewRetryQueue(clk, func(_ context.Context, t Task) {
+		// A refused enqueue still releases internally; the return
+		// value is irrelevant for a retry that hit a stopped pool.
+		_ = p.Enqueue(t)
+	}, func(t Task, attempt int) {
+		if rep != nil {
+			rep.RetryScheduled(t.StoreJob.Name, attempt)
+		}
+	})
+	return p
 }
 
-// SetRetry wires the retry sink (installed after RetryQueue exists).
-func (p *Pool) SetRetry(fn func(context.Context, Task, time.Duration)) { p.retry = fn }
+// RetryQueue exposes the pool's retry sink for stop/cancel wiring.
+func (p *Pool) RetryQueue() *RetryQueue { return p.retry }
 
 // Start launches workers; each exits when ctx is done or Drain runs.
 func (p *Pool) Start(ctx context.Context) {
@@ -337,12 +355,10 @@ func (p *Pool) handleRetries(dbCtx context.Context, runID int64, t Task, start t
 		}
 		return
 	}
-	if p.retry == nil {
-		return
-	}
 	// A retry timer armed just before shutdown may outlive the
-	// scheduler; its delivery will be refused by the stopped pool.
-	p.retry(dbCtx, Task{StoreJob: j, Attempt: t.Attempt + 1}, backoffDelay(t.Attempt))
+	// scheduler; its delivery will be refused by the stopped pool and
+	// the execution-time job check drops deleted/disabled jobs.
+	p.retry.Arm(dbCtx, Task{StoreJob: j, Attempt: t.Attempt + 1}, backoffDelay(t.Attempt))
 }
 
 // backoffDelay schedules attempt n+1 after 2^(n-1) seconds capped at
@@ -360,11 +376,6 @@ func backoffDelay(attempt int) time.Duration {
 		d = 5 * time.Minute
 	}
 	return d
-}
-
-// eventClock is the subset of clock.Clock the pool needs.
-type eventClock interface {
-	Now() time.Time
 }
 
 // ShellExecutor runs commands through the OS shell so script syntax
