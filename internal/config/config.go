@@ -9,13 +9,17 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"scheduler/internal/scheduler"
 )
 
-// Missed task policies applied at scheduler startup.
+// Missed task policies are defined by the scheduler (they are runtime
+// behaviour); config aliases them so this layer keeps spelling the
+// names without owning the domain constants.
 const (
-	PolicySkip    = "skip"
-	PolicyCatchup = "catchup"
-	PolicyLatest  = "latest"
+	PolicySkip    = scheduler.PolicySkip
+	PolicyCatchup = scheduler.PolicyCatchup
+	PolicyLatest  = scheduler.PolicyLatest
 )
 
 // Config holds all runtime settings. Fields are validated by Load.

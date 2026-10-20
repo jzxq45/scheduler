@@ -12,9 +12,17 @@ import (
 	"time"
 
 	"scheduler/internal/clock"
-	"scheduler/internal/config"
 	"scheduler/internal/cronexpr"
 	"scheduler/internal/store"
+)
+
+// Missed policies applied at startup replay. They belong here —
+// policy is scheduler behaviour, not transport configuration; the
+// config layer only validates the spelling and passes the string.
+const (
+	PolicySkip    = "skip"
+	PolicyCatchup = "catchup"
+	PolicyLatest  = "latest"
 )
 
 // Options selects scheduler behaviour.
@@ -42,7 +50,14 @@ func (o *Options) normalize() {
 		o.DrainTimeout = 30 * time.Second
 	}
 	if o.MissedPolicy == "" {
-		o.MissedPolicy = config.PolicySkip
+		o.MissedPolicy = PolicySkip
+	}
+	switch o.MissedPolicy {
+	case PolicySkip, PolicyCatchup, PolicyLatest:
+	default:
+		// Validate defensively: config validates at load, but a
+		// programmatic Options must not silently invent a policy.
+		o.MissedPolicy = PolicySkip
 	}
 	if o.Log == nil {
 		o.Log = slog.Default()
@@ -149,9 +164,9 @@ func (s *Scheduler) replayMissed(ctx context.Context) error {
 			continue
 		}
 		switch s.opt.MissedPolicy {
-		case config.PolicyCatchup:
+		case PolicyCatchup:
 			s.catchupMissed(ctx, now, j)
-		case config.PolicyLatest:
+		case PolicyLatest:
 			if j.NextRunAt == nil || j.NextRunAt.After(now) {
 				continue
 			}
