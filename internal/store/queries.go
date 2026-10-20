@@ -464,16 +464,34 @@ func collectRuns(rows *sql.Rows) ([]Run, error) {
 	return out, rows.Err()
 }
 
-// DeleteRunsBefore removes finished runs older than the cutoff and
-// returns how many rows were affected.
+// deleteBatch is how many rows one retention statement removes before
+// looping. Unbounded single-statement deletes hold the one SQLite
+// connection (and therefore the tick loop) for seconds on a large
+// runs table; batches interleave with normal traffic.
+const deleteBatch = 500
+
+// DeleteRunsBefore removes finished runs older than the cutoff in
+// batches and returns how many rows were affected.
 func (db *DB) DeleteRunsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
-	res, err := db.ExecContext(ctx, `DELETE FROM runs WHERE started_at < ?`, ms(cutoff))
-	if err != nil {
-		return 0, fmt.Errorf("retention: %w", err)
+	cutMS := ms(cutoff)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, fmt.Errorf("retention: %w", err)
+		}
+		res, err := db.ExecContext(ctx,
+			`DELETE FROM runs WHERE id IN
+			 (SELECT id FROM runs WHERE started_at < ? LIMIT ?)`, cutMS, deleteBatch)
+		if err != nil {
+			return total, fmt.Errorf("retention: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("retention: %w", err)
+		}
+		total += n
+		if n < deleteBatch {
+			return total, nil
+		}
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("retention: %w", err)
-	}
-	return n, nil
 }
