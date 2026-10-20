@@ -331,8 +331,8 @@ func TestRetryBackoffAndDeadLetter(t *testing.T) {
 	// Only the last attempt of the retry chain is dead-lettered;
 	// intermediate attempts keep their plain failed status.
 	for _, r := range runs {
-		switch {
-		case r.Attempt == 3:
+		switch r.Attempt {
+		case 3:
 			if r.Status != store.StatusFailedFinal {
 				t.Errorf("run=%d attempt=3 status %s, want failed_final", r.ID, r.Status)
 			}
@@ -629,13 +629,13 @@ func TestQueueFullRecordsSkipped(t *testing.T) {
 	})
 	var skipped int
 	for _, r := range mustRuns(t, db, 20) {
-		switch {
-		case r.Status == store.StatusSkipped:
+		switch r.Status {
+		case store.StatusSkipped:
 			skipped++
 			if r.Error == "" {
 				t.Errorf("skipped run %d lost its reason", r.ID)
 			}
-		case r.Status == store.StatusSuccess:
+		case store.StatusSuccess:
 		default:
 			t.Errorf("run %d status %s", r.ID, r.Status)
 		}

@@ -45,8 +45,6 @@ func NewBroker() *Broker {
 
 func (b *Broker) setMax(n int) { b.mu.Lock(); b.max = n; b.mu.Unlock() }
 
-func (b *Broker) size() int { b.mu.Lock(); defer b.mu.Unlock(); return len(b.subs) }
-
 // Subscribe registers a new subscriber or reports ErrSubscribedFull
 // when the cap is reached. The returned cancel func must be called on
 // disconnect. Buffers hold 64 events ≈ a burst's worth.
