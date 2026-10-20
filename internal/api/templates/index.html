@@ -85,26 +85,40 @@ async function refresh() {
   if (!res.ok) return;
   const jobs = await res.json();
   const tb = document.querySelector('#jobs tbody');
-  tb.innerHTML = '';
+  tb.replaceChildren();
   for (const j of jobs) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${esc(j.name)}</td><td><code>${esc(j.schedule)}</code></td>` +
-      `<td>${j.enabled ? 'yes' : 'no'}</td><td>${esc(j.last_run_at || '—')}</td>` +
-      `<td>${esc(j.next_run_at || '—')}</td>` +
-      `<td><button data-act="run" data-id="${j.id}">Run now</button>` +
-      `<button data-act="runs" data-id="${j.id}" data-name="${esc(j.name)}">Runs</button>` +
-      `<button data-act="del" data-id="${j.id}">Delete</button></td>`;
+    const tr = el('tr');
+    tr.appendChild(el('td', j.name));
+    tr.appendChild(withChild(el('td'), el('code', j.schedule)));
+    tr.appendChild(el('td', j.enabled ? 'yes' : 'no'));
+    tr.appendChild(el('td', j.last_run_at || '—'));
+    tr.appendChild(el('td', j.next_run_at || '—'));
+    const actions = el('td');
+    for (const [act, label] of [['run', 'Run now'], ['runs', 'Runs'], ['del', 'Delete']]) {
+      const b = el('button', label);
+      b.dataset.act = act;
+      b.dataset.id = j.id;
+      if (act === 'runs') b.dataset.name = j.name;
+      actions.appendChild(b);
+    }
+    tr.appendChild(actions);
     tb.appendChild(tr);
   }
 }
 
-function esc(s) {
-  const d = document.createElement('div');
-  d.textContent = String(s);
-  // innerHTML serialization leaves quotes intact; replacing them means
-  // a hostile value cannot break out of an HTML attribute context
-  // (e.g. data-name="<script…>").
-  return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+// el builds a DOM node with textContent — values from the API are
+// never interpolated into HTML strings, so there is no markup sink to
+// attack (no innerHTML + manual escaping games).
+function el(tag, text, cls) {
+  const n = document.createElement(tag);
+  if (text != null) n.textContent = String(text);
+  if (cls) n.className = cls;
+  return n;
+}
+
+function withChild(parent, child) {
+  parent.appendChild(child);
+  return parent;
 }
 
 document.querySelector('#jobs').addEventListener('click', async (ev) => {
@@ -128,13 +142,19 @@ async function showRuns(id, name) {
   if (!res.ok) return;
   const runs = await res.json();
   const tb = document.querySelector('#runs tbody');
-  tb.innerHTML = '';
+  tb.replaceChildren();
   for (const r of runs) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${esc(r.started_at)}</td>` +
-      `<td class="status-${esc(r.status)}">${esc(r.status)}${r.attempt > 1 ? ' (try ' + r.attempt + ')' : ''}</td>` +
-      `<td>${r.attempt}</td>` +
-      `<td><pre style="white-space:pre-wrap;margin:0">${esc((r.output || '') + (r.error ? '\nERR: ' + r.error : ''))}</pre></td>`;
+    const tr = el('tr');
+    tr.appendChild(el('td', r.started_at));
+    tr.appendChild(el('td',
+      r.status + (r.attempt > 1 ? ' (try ' + r.attempt + ')' : ''),
+      'status-' + r.status));
+    tr.appendChild(el('td', r.attempt));
+    const pre = el('pre',
+      (r.output || '') + (r.error ? '\nERR: ' + r.error : ''));
+    pre.style.whiteSpace = 'pre-wrap';
+    pre.style.margin = '0';
+    tr.appendChild(withChild(el('td'), pre));
     tb.appendChild(tr);
   }
   document.querySelector('#runsPane').style.display = '';

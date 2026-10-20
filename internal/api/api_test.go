@@ -148,8 +148,8 @@ func TestBearerAuth(t *testing.T) {
 }
 
 // TestUIRenderSmoke guards the dashboard template: it must render and
-// ship the quote-escaping esc() so job names cannot break HTML
-// attributes (stored-XSS fix).
+// must not wire API values into markup — job/run data goes through
+// textContent DOM nodes, so there is no HTML sink to inject into.
 func TestUIRenderSmoke(t *testing.T) {
 	s, _, _ := testServer(t)
 	rec, body := do(t, s, "GET", "/", nil)
@@ -157,14 +157,14 @@ func TestUIRenderSmoke(t *testing.T) {
 		t.Fatalf("ui: %d", rec.Code)
 	}
 	html := string(body)
-	if !strings.Contains(html, `&quot;`) {
-		t.Errorf("esc() does not escape double quotes")
+	if strings.Contains(html, "esc(") || strings.Contains(html, "innerHTML =") {
+		t.Errorf("template must not build markup from API values via innerHTML")
 	}
-	if !strings.Contains(html, `&#39;`) {
-		t.Errorf("esc() does not escape single quotes")
+	if !strings.Contains(html, "n.textContent = String(text)") {
+		t.Errorf("template must set user data via textContent")
 	}
-	if !strings.Contains(html, `data-name="${esc(j.name)}"`) {
-		t.Errorf("attribute injection guard missing")
+	if !strings.Contains(html, "replaceChildren") {
+		t.Errorf("table clearing must not use innerHTML")
 	}
 }
 
