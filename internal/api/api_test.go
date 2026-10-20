@@ -62,7 +62,7 @@ func testServer(t *testing.T) (*Server, *store.DB, *starter) {
 	}
 	t.Cleanup(func() { db.Close() })
 	st := &starter{}
-	s := New(db, st, nil, nil, "")
+	s := New(db, st, nil, nil, "", nil)
 	return s, db, st
 }
 
@@ -108,7 +108,7 @@ func TestBearerAuth(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	st := &starter{}
-	ts := New(db, st, nil, nil, "s3cret")
+	ts := New(db, st, nil, nil, "s3cret", nil)
 
 	// Missing token → 401 everywhere.
 	rec, body := do(t, ts, "GET", "/api/jobs", nil)

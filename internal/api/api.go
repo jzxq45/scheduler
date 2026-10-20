@@ -47,6 +47,8 @@ type Server struct {
 	// now is the handler time source, so the project rule "all time
 	// flows through an injectable clock" covers the API too.
 	now func() time.Time
+	// metricsHandler is mounted at GET /metrics during construction.
+	metrics http.Handler
 	// trustProxy, when set, takes the rate-limit key from
 	// X-Forwarded-For instead of the socket address: behind a reverse
 	// proxy every client otherwise shares the single loopback bucket.
@@ -77,8 +79,10 @@ func (r *statusRecorder) Flush() {
 // New builds the server; RunStarter may be nil for API-only setups,
 // in which case "run now" answers 503. A pre-made broker lets main
 // share one hub between the scheduler Reporter and the server. An
-// empty apiToken disables authentication.
-func New(db *store.DB, sched RunStarter, log *slog.Logger, b *Broker, apiToken string) *Server {
+// empty apiToken disables authentication. metricsHandler, when
+// non-nil, is mounted at GET /metrics at construction: registering
+// routes after serving would be a data race on the mux.
+func New(db *store.DB, sched RunStarter, log *slog.Logger, b *Broker, apiToken string, metricsHandler http.Handler) *Server {
 	if b == nil {
 		b = NewBroker()
 	}
@@ -90,6 +94,7 @@ func New(db *store.DB, sched RunStarter, log *slog.Logger, b *Broker, apiToken s
 		token:    apiToken,
 		runLimit: newRateLimiter(defaultRunRatePerMin, time.Minute),
 		now:      time.Now,
+		metrics:  metricsHandler,
 	}
 	if log == nil {
 		s.log = slog.Default()
@@ -175,12 +180,6 @@ func (s *Server) SetTrustedProxy(v bool) { s.trustProxy = v }
 // per-job series. Must be called before serving.
 func (s *Server) SetJobCleanup(fn func(name string)) { s.onJobDelete = fn }
 
-// MetricsHandler registers an extra GET route (used for /metrics).
-// Must be called before the server starts serving.
-func (s *Server) MetricsHandler(h http.Handler) {
-	s.mux.Handle("GET /metrics", h)
-}
-
 func (s *Server) routes() {
 	mux := http.NewServeMux()
 
@@ -196,6 +195,9 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST /api/jobs/{id}/run", s.runJob)
 	mux.HandleFunc("GET /api/jobs/{id}/runs", s.listRuns)
 	mux.HandleFunc("GET /events", s.events)
+	if s.metrics != nil {
+		mux.Handle("GET /metrics", s.metrics)
+	}
 	s.mux = mux
 }
 
