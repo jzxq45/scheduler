@@ -44,6 +44,9 @@ type Server struct {
 	token string
 	// runLimit throttles manual "run now" triggers per client IP.
 	runLimit *rateLimiter
+	// now is the handler time source, so the project rule "all time
+	// flows through an injectable clock" covers the API too.
+	now func() time.Time
 	// trustProxy, when set, takes the rate-limit key from
 	// X-Forwarded-For instead of the socket address: behind a reverse
 	// proxy every client otherwise shares the single loopback bucket.
@@ -86,6 +89,7 @@ func New(db *store.DB, sched RunStarter, log *slog.Logger, b *Broker, apiToken s
 		broker:   b,
 		token:    apiToken,
 		runLimit: newRateLimiter(defaultRunRatePerMin, time.Minute),
+		now:      time.Now,
 	}
 	if log == nil {
 		s.log = slog.Default()
@@ -296,7 +300,6 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	j.NextRunAt = s.nextRun(j, time.Now())
 	id, err := s.db.CreateJob(r.Context(), &j)
 	if err != nil {
 		if errors.Is(err, store.ErrDuplicate) {
@@ -306,7 +309,8 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.broker.Publish(Event{Type: "job_created", Job: j.Name, At: time.Now()})
+	s.broker.Publish(Event{Type: "job_created", Job: j.Name, At: s.now()})
+
 	created, err := s.db.GetJob(r.Context(), id)
 	if err != nil {
 		// Failure reading back what we just wrote is a 500, not a
@@ -374,8 +378,6 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j.ID = id
-	// Recompute next_run after a schedule change.
-	j.NextRunAt = s.nextRun(j, time.Now())
 	if err := s.db.UpdateJob(r.Context(), &j); err != nil {
 		if errors.Is(err, store.ErrDuplicate) {
 			httpError(w, http.StatusConflict, "job name already exists")
@@ -386,7 +388,8 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.broker.Publish(Event{Type: "job_updated", Job: j.Name, At: time.Now()})
+	s.broker.Publish(Event{Type: "job_updated", Job: j.Name, At: s.now()})
+
 	// Disabling must not leave a running execution or armed retries.
 	if !j.Enabled && s.sched != nil {
 		s.sched.StopJob(id)
@@ -420,7 +423,8 @@ func (s *Server) deleteJob(w http.ResponseWriter, r *http.Request) {
 	if s.onJobDelete != nil {
 		s.onJobDelete(j.Name)
 	}
-	s.broker.Publish(Event{Type: "job_deleted", Job: j.Name, At: time.Now()})
+	s.broker.Publish(Event{Type: "job_deleted", Job: j.Name, At: s.now()})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -515,7 +519,8 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusConflict, err.Error())
 		return
 	}
-	s.broker.Publish(Event{Type: "run_triggered", Job: strconv.FormatInt(id, 10), At: time.Now()})
+	s.broker.Publish(Event{Type: "run_triggered", Job: strconv.FormatInt(id, 10), At: s.now()})
+
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -594,7 +599,10 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 
 // ---- helpers ----
 
-// buildJob validates the DTO into a store.Job.
+// buildJob validates the DTO into a store.Job and computes the first
+// next_run_at from the server clock (the Schedule regexp parser runs
+// here exactly once — handlers previously parsed it two or three
+// times through buildJob + nextRun).
 func (s *Server) buildJob(d JobDTO) (store.Job, error) {
 	j := store.Job{
 		Name: d.Name, Schedule: d.Schedule, Command: d.Command,
@@ -614,7 +622,8 @@ func (s *Server) buildJob(d JobDTO) (store.Job, error) {
 	if j.MaxRetries < 0 || j.MaxRetries > maxRetriesAllowed {
 		return j, fmt.Errorf("max_retries must be 0..%d, got %d", maxRetriesAllowed, j.MaxRetries)
 	}
-	if _, err := cronexpr.Parse(j.Schedule); err != nil {
+	e, err := cronexpr.Parse(j.Schedule)
+	if err != nil {
 		return j, fmt.Errorf("schedule: %w", err)
 	}
 	if j.Timezone == "" {
@@ -622,20 +631,20 @@ func (s *Server) buildJob(d JobDTO) (store.Job, error) {
 	} else if _, err := time.LoadLocation(j.Timezone); err != nil {
 		return j, fmt.Errorf("timezone: %w", err)
 	}
+	next := e.NextIn(s.now(), loadLocOr(j.Timezone))
+	j.NextRunAt = &next
 	return j, nil
 }
 
-func (s *Server) nextRun(j store.Job, now time.Time) *time.Time {
-	e, err := cronexpr.Parse(j.Schedule)
+// loadLocOr resolves a timezone name, falling back to UTC: callers
+// validate the name before this helper; the fallback only covers
+// tests that skip validation.
+func loadLocOr(name string) *time.Location {
+	loc, err := time.LoadLocation(name)
 	if err != nil {
-		return nil
+		return time.UTC
 	}
-	loc, err := time.LoadLocation(j.Timezone)
-	if err != nil {
-		loc = time.UTC
-	}
-	next := e.NextIn(now, loc)
-	return &next
+	return loc
 }
 
 func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
