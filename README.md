@@ -106,6 +106,17 @@ commands**, so it is dangerous to expose by default:
 - **No secrets in logs** — the scheduler logs configuration keys,
   not values like the token; run output lives in the SQLite file,
   not in stdout.
+- **Rate limiting** — `POST /api/jobs/{id}/run` is limited to 5
+  triggers per client IP per minute. Behind a reverse proxy set
+  `trust_proxy: true` (or `SCHEDULER_TRUST_PROXY=true`) so clients are
+  keyed by `X-Forwarded-For` instead of all sharing the proxy's
+  address; only set it when your proxy overwrites that header.
+
+## Health checks
+
+`GET /healthz` answers `200 {"status":"ok"}` when the process and the
+SQLite store both respond, and `503 {"status":"down"}` when the store
+is not answering — wire this into your container/lb probes.
 
 ## API Reference
 

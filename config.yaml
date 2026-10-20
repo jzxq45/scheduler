@@ -12,3 +12,7 @@ missed_policy: skip # skip | catchup | latest
 # (or "&token=<token>" for SSE clients). Leave empty in a trusted
 # single-user environment.
 # api_token: "change-me"
+# Behind a reverse proxy, key rate limiting by X-Forwarded-For instead
+# of the (shared) proxy address. Only enable when your proxy always
+# overwrites that header. Defaults to false.
+# trust_proxy: true
