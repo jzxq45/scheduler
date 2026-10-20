@@ -431,6 +431,34 @@ func TestDeleteStopsExecutions(t *testing.T) {
 	}
 }
 
+// TestDeleteRunsCleanupHook: the deleted job's name must reach the
+// cleanup hook so external registries drop their per-job series.
+func TestDeleteRunsCleanupHook(t *testing.T) {
+	s, db, _ := testServer(t)
+	deleted := make(chan string, 4)
+	s.SetJobCleanup(func(name string) { deleted <- name })
+	ctx := context.Background()
+	j, err := db.CreateJob(ctx, &store.Job{
+		Name: "ephemeral", Schedule: "* * * * *", Command: "x", Enabled: true,
+		Timezone: "UTC", TimeoutSeconds: 60,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := do(t, s, "DELETE", fmt.Sprintf("/api/jobs/%d", j), nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d", rec.Code)
+	}
+	select {
+	case name := <-deleted:
+		if name != "ephemeral" {
+			t.Fatalf("cleanup got %q", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cleanup hook never invoked")
+	}
+}
+
 func TestRunHistory(t *testing.T) {
 	s, db, _ := testServer(t)
 	ctx := context.Background()

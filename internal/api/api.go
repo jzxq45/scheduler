@@ -48,6 +48,9 @@ type Server struct {
 	// X-Forwarded-For instead of the socket address: behind a reverse
 	// proxy every client otherwise shares the single loopback bucket.
 	trustProxy bool
+	// onJobDelete drops job-scoped registry state (metrics series) for
+	// deleted jobs so label churn cannot grow those maps forever.
+	onJobDelete func(name string)
 }
 
 // statusRecorder captures the response code for the access log while
@@ -162,6 +165,11 @@ func (s *Server) Broker() *Broker { return s.broker }
 // keys. Must be called before serving; false (default) never trusts
 // client-supplied headers.
 func (s *Server) SetTrustedProxy(v bool) { s.trustProxy = v }
+
+// SetJobCleanup installs a hook invoked with the deleted job's name,
+// so external registries (Prometheus exposition) can drop their
+// per-job series. Must be called before serving.
+func (s *Server) SetJobCleanup(fn func(name string)) { s.onJobDelete = fn }
 
 // MetricsHandler registers an extra GET route (used for /metrics).
 // Must be called before the server starts serving.
@@ -408,6 +416,9 @@ func (s *Server) deleteJob(w http.ResponseWriter, r *http.Request) {
 	// No ghost executions: a running run and armed retries stop here.
 	if s.sched != nil {
 		s.sched.StopJob(id)
+	}
+	if s.onJobDelete != nil {
+		s.onJobDelete(j.Name)
 	}
 	s.broker.Publish(Event{Type: "job_deleted", Job: j.Name, At: time.Now()})
 	w.WriteHeader(http.StatusNoContent)

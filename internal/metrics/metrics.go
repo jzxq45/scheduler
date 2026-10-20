@@ -12,11 +12,18 @@ import (
 	"time"
 )
 
+// maxTrackedJobs bounds the registry: labels are arbitrary strings
+// coming from an API where anyone can create jobs, so an unbounded set
+// would let job-name churn explode the Prometheus series set (and the
+// maps) without limit. Beyond the cap, unknown names are not tracked.
+const maxTrackedJobs = 4096
+
 // Metrics aggregates scheduler activity by job name.
 type Metrics struct {
 	mu        sync.Mutex
+	names     map[string]struct{} // distinct tracked job names (the cardinality guard)
 	started   map[string]uint64
-	finished  map[string]map[string]uint64 // job → status → count
+	finished  map[string]map[string]uint64
 	retries   map[string]uint64
 	sumSec    map[string]float64 // duration sum per job
 	count     map[string]uint64  // finished run count per job
@@ -28,6 +35,7 @@ type Metrics struct {
 // New creates zeroed metrics.
 func New() *Metrics {
 	return &Metrics{
+		names:     make(map[string]struct{}),
 		started:   make(map[string]uint64),
 		finished:  make(map[string]map[string]uint64),
 		retries:   make(map[string]uint64),
@@ -39,17 +47,51 @@ func New() *Metrics {
 	}
 }
 
+// track marks a name as tracked and reports whether series may be
+// created for it: the registry caps distinct job names, seen ones
+// always count. m.mu must be held.
+func (m *Metrics) track(name string) bool {
+	if _, ok := m.names[name]; ok {
+		return true
+	}
+	if len(m.names) >= maxTrackedJobs {
+		return false
+	}
+	m.names[name] = struct{}{}
+	return true
+}
+
+// ResetJob drops every series of one job name. Job deletion calls it:
+// the registry must not hold labels for jobs that no longer exist.
+func (m *Metrics) ResetJob(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.names, name)
+	delete(m.started, name)
+	delete(m.finished, name)
+	delete(m.retries, name)
+	delete(m.sumSec, name)
+	delete(m.count, name)
+	delete(m.lastSec, name)
+	delete(m.nextInSec, name)
+}
+
 // JobStarted increments the started counter.
 func (m *Metrics) JobStarted(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.started[name]++
+	if m.track(name) {
+		m.started[name]++
+	}
 }
 
 // JobFinished increments the per-status counter and duration stats.
 func (m *Metrics) JobFinished(name, status string, d time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.track(name) {
+		return
+	}
 	if m.finished[name] == nil {
 		m.finished[name] = make(map[string]uint64)
 	}
@@ -64,14 +106,18 @@ func (m *Metrics) JobFinished(name, status string, d time.Duration) {
 func (m *Metrics) RetryScheduled(name string, _ int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.retries[name]++
+	if m.track(name) {
+		m.retries[name]++
+	}
 }
 
 // NextRunSet records how far away the next scheduled run is.
 func (m *Metrics) NextRunSet(name string, d time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.nextInSec[name] = d.Seconds()
+	if m.track(name) {
+		m.nextInSec[name] = d.Seconds()
+	}
 }
 
 // UptimeSeconds exposes process uptime as a gauge value.
